@@ -5,7 +5,7 @@ tags: [moc, handoff]
 
 # Handoffs
 
-- [[handoffs/2026-10-06-initial-package]] — the initial package.
+- [[handoffs/2026-10-06-initial-package]] — complete: 0.1.0 released as `v0.1.0`.
 
 ## Referenced by
 
