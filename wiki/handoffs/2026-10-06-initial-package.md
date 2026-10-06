@@ -17,6 +17,11 @@ tags: [handoff, delivery]
   over `src`, `test`, `tools`, and `examples`; every suite passes; every example answers 0; the
   mutation gate kills 12 of 12 mutants of `Domain/`.
 - The vault matches the code, and `test/Package/VaultTest` keeps it so ([[architecture/TESTING]]).
+- PR #2 into `dev` and PR #3 into `main` passed the Linux `checks` and `mutation` jobs.
+- Released 0.1.0 as tag `v0.1.0` with a GitHub release; `pudu search` lists
+  `@chrismichaelps/pudu-lang-mediator` with 0.1.0 as latest.
+- The GitHub wiki holds the API book: ten chapters whose programs were checked and run against
+  the package, a reference index, and the worked programs.
 
 ## Decided (do not re-litigate)
 
@@ -32,7 +37,7 @@ tags: [handoff, delivery]
 
 ## Exact next action
 
-None; the initial package is complete.
+None; the initial package is released.
 
 ## Links
 
@@ -40,4 +45,4 @@ None; the initial package is complete.
 
 ## Referenced by
 
-[[handoffs/_MOC]]
+[[CHANGELOG]] · [[handoffs/_MOC]]
