@@ -5,6 +5,11 @@ tags: [changelog]
 
 # Changelog
 
+## 2026-10-06 — Initial release 0.1.0 (#1)
+
+- Released 0.1.0 as tag `v0.1.0` with a GitHub release; `pudu search` lists the package with
+  0.1.0 as latest, and the GitHub wiki holds the API book ([[handoffs/2026-10-06-initial-package]]).
+
 ## 2026-10-06 — Initial package (#1)
 
 - The package `@chrismichaelps/pudu-lang-mediator` 0.1.0 with the module root `PuduLangMediator`
