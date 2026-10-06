@@ -1,0 +1,46 @@
+/** @Examples.Streaming.Program — a stream consumed by a sink, collected, and pulled by a reader */
+module Streaming
+
+import Std.Io as Io
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Reader as Reader
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Stream as Stream
+
+/// Streams the first numbers of the Fibonacci sequence three ways.
+fn main() -> Int {
+  let fibonacci: Stream.Kind[Int, Int, Str] = Stream.kind("fibonacci")
+  let built = Mediator.build([
+      Registration.streamHandler(&fibonacci, fn(count: Int, context: Context.Context, sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+          var current = 0
+          var following = 1
+          var emitted = 0
+          while emitted < count {
+            Context.check(&context) ?
+            if !sink(current) { return Ok(()) }
+            let sum = current + following
+            current = following
+            following = sum
+            emitted = emitted + 1
+          }
+          Ok(())
+        }),
+      Registration.streamBehavior(&fibonacci, fn(_count: Int, context: Context.Context, sink: Stream.Sink[Int], next: Stream.Next[Int, Str]) -> Messaging.Outcome[(), Str] {
+          next(context, |item: Int| item % 2 == 1 || sink(item))
+        })
+    ])
+  let mediator = match built {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let evens = Mediator.collect(&mediator, &fibonacci, 12)
+  let _said = Io.writeLine("even Fibonacci numbers: " + Messaging.summarize(&evens))
+  let reader = Mediator.reader(&mediator, &fibonacci, 1000, &Context.create(), 4)
+  let first = Reader.next(&reader)
+  let second = Reader.next(&reader)
+  Reader.close(&reader)
+  let _pulled = Io.writeLine("pulled " + show(first) + " then " + show(second))
+  if evens == Ok([0, 2, 8, 34]) && first == Some(Ok(0)) && second == Some(Ok(2)) { 0 } else { 1 }
+}

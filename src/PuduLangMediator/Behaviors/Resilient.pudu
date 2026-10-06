@@ -1,0 +1,46 @@
+/** @Mediator.Behaviors.Resilient.Module — requests run through a resilience pipeline */
+module PuduLangMediator.Behaviors.Resilient
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator as Messaging
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangResilience.Context as Guard
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+
+/// A behavior running the rest of the pipeline under `pipeline`'s retry, timeout, circuit, rate,
+/// hedging, and fallback policies. Each attempt observes the strategies' token through its
+/// context; a failure of the rest of the pipeline reaches the strategies as `Raised`, except a
+/// cancellation, which stays one.
+export fn behavior[Q, R, E](pipeline: Pipeline.Pipeline[R, Messaging.Failure[E]]) -> Request.Behavior[Q, R, E] {
+  fn(_request: Q, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    let outcome = Pipeline.executeWith(&pipeline, Guard.cancellable(context.token), fn(attempt: Guard.Context) -> Resilience.Outcome[R, Messaging.Failure[E]] {
+        match next(Context.withToken(&context, attempt.token)) {
+          case Ok(value) => Ok(value)
+          case Err(Messaging.Cancelled(reason)) => Err(Resilience.Cancelled(reason))
+          case Err(failure) => Err(Resilience.Raised(failure))
+        }
+      })
+    match outcome {
+      case Ok(value) => Ok(value)
+      case Err(failure) => Err(translated(&failure))
+    }
+  }
+}
+
+/// The resilience behavior of one request kind.
+export fn register[Q, R, E](subject: &Request.Kind[Q, R, E], pipeline: Pipeline.Pipeline[R, Messaging.Failure[E]]) -> Registration.Registration {
+  Registration.behavior(subject, behavior(pipeline))
+}
+
+/// A resilience failure as a mediator failure: the pipeline's own failure unchanged, a
+/// cancellation or crash as one, and a strategy's rejection refused with its description.
+export fn translated[E](failure: &Resilience.Failure[Messaging.Failure[E]]) -> Messaging.Failure[E] {
+  match failure {
+    case Resilience.Raised(inner) => inner
+    case Resilience.Cancelled(reason) => Messaging.Cancelled(reason)
+    case Resilience.Crashed(reason) => Messaging.Crashed(reason)
+    case rejection => Messaging.Refused(Resilience.describe(&rejection))
+  }
+}

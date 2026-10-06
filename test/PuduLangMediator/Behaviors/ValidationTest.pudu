@@ -1,0 +1,72 @@
+/** @Test.Behaviors.Validation.Suite — requests and streams refused by their rules */
+module PuduLangMediator.Behaviors.ValidationTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Behaviors.Validation as Validation
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Shared as Shared
+import PuduLangValidator.Rule as Rule
+import PuduLangValidator.Rules.Number as NumberRule
+import PuduLangValidator.Rules.Text as TextRule
+import PuduLangValidator.Validator as Validator
+
+/** @Test.Behaviors.Validation.SignUp — a request with rules */
+type SignUp = { name: Str, age: Int }
+
+/// The rules a sign-up must keep.
+fn rules() -> Validator.Validator[SignUp] {
+  let name = Rule.build(TextRule.notEmpty(Rule.ruleFor("name", |request: SignUp| request.name)))
+  let age = Rule.build(NumberRule.greaterThanOrEqualTo(Rule.ruleFor("age", |request: SignUp| request.age), 18))
+  Validator.add(Validator.add(Validator.create(), name), age)
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let signUp: Request.Kind[SignUp, Int, Str] = Request.kind("users.signUp")
+  let roster: Stream.Kind[SignUp, Str, Str] = Stream.kind("users.roster")
+  let handled = Shared.shared(0)
+  let mediator = match Mediator.build([
+      Validation.register(&signUp, rules()),
+      Registration.handler(&signUp, fn(request: SignUp, _context: Context.Context) -> Messaging.Outcome[Int, Str] {
+          Shared.update(&handled, |count: Int| count + 1)
+          Ok(request.age)
+        }),
+      Validation.registerStream(&roster, rules()),
+      Registration.streamHandler(&roster, fn(request: SignUp, _context: Context.Context, sink: Stream.Sink[Str]) -> Messaging.Outcome[(), Str] {
+          Stream.each(&[request.name, request.name], sink)
+        })
+    ]) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let accepted = Mediator.send(&mediator, &signUp, SignUp{name: "ada", age: 36})
+  let rejected = Mediator.send(&mediator, &signUp, SignUp{name: "", age: 12})
+  let violations = match rejected {
+    case Err(failure) => Messaging.violations(&failure)
+    case Ok(_) => []
+  }
+  let checks = Test.suite("Behaviors.Validation", &[
+      Test.equals("a valid request reaches its handler", &accepted, &Ok(36)),
+      Test.equals("an invalid request names every property it broke", &violations.map(|one: Messaging.Violation| one.property), &["name", "age"]),
+      Test.that("each violation carries its rule's code", violations.length() == 2 && !violations[0].code.isEmpty()),
+      Test.equals("an invalid request never reaches its handler", &Shared.current(&handled), &1),
+      Test.that("the failure describes what was wrong", match rejected {
+          case Err(failure) => Messaging.describe(&failure).startsWith("The message is invalid: name: ")
+          case Ok(_) => false
+        }),
+      Test.equals("a valid stream emits", &Mediator.collect(&mediator, &roster, SignUp{name: "grace", age: 40}), &Ok(["grace", "grace"])),
+      Test.equals("an invalid stream emits nothing", &(match Mediator.collect(&mediator, &roster, SignUp{name: "", age: 40}) { case Ok(items) => items.length() case Err(failure) => 0 - Messaging.violations(&failure).length() }), &(0 - 1)),
+      Test.equals("an empty result has no violations", &Validation.violationsOf(&Validator.validate(&rules(), SignUp{name: "x", age: 20})), &[])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

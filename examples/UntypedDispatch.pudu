@@ -1,0 +1,43 @@
+/** @Examples.UntypedDispatch.Program — envelopes routed by a component that names no types */
+module UntypedDispatch
+
+import Std.Io as Io
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+
+/// Runs every envelope of a queue through the mediator, as a job runner that names no types would.
+fn drain(mediator: &Mediator.Mediator, queue: Array[Message.Envelope]) -> Array[Message.Answer] {
+  queue.map(fn(envelope: Message.Envelope) -> Message.Answer {
+      match envelope.info.shape {
+        case Message.Event => Mediator.broadcast(mediator, envelope)
+        case _ => Mediator.dispatch(mediator, envelope)
+      }
+    })
+}
+
+/// Queues three envelopes of different types and reads each answer back with its kind.
+fn main() -> Int {
+  let square: Request.Kind[Int, Int, Str] = Request.kind("math.square")
+  let shout: Request.Kind[Str, Str, Str] = Request.kind("text.shout")
+  let ticked: Notification.Kind[Int, Str] = Notification.kind("clock.ticked")
+  let mediator = match Mediator.build([
+      Registration.handler(&square, |n: Int, _context: Context.Context| Ok(n * n)),
+      Registration.handler(&shout, |text: Str, _context: Context.Context| Ok(text.toUpper() + "!"))
+    ]) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let answers = drain(&mediator, [Request.envelope(&square, 12), Request.envelope(&shout, "hello"), Notification.envelope(&ticked, 1)])
+  for answer in answers {
+    let _said = Io.writeLine(answer.info.name + " -> " + answer.summary)
+  }
+  let squared = Request.answerOf(&square, &answers[0])
+  let shouted = Request.answerOf(&shout, &answers[1])
+  let heard = Notification.answerOf(&ticked, &answers[2])
+  if squared == Some(Ok(144)) && shouted == Some(Ok("HELLO!")) && heard == Some(Ok(())) { 0 } else { 1 }
+}

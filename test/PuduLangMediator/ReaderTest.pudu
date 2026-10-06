@@ -1,0 +1,86 @@
+/** @Test.Reader.Suite — pulled streams, back-pressure, failures, crashes, and closing */
+module PuduLangMediator.ReaderTest
+
+import Std.Concurrent as Concurrent
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Context as Context
+import PuduLangMediator as Messaging
+import PuduLangMediator.Reader as Reader
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Shared as Shared
+
+/// A producer of `count` numbers that counts how many it handed over.
+fn numbers(count: Int, produced: Shared.Shared[Int]) -> fn(Context.Context, Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+  fn(_context: Context.Context, sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+    var next = 1
+    while next <= count {
+      if !sink(next) { return Ok(()) }
+      Shared.update(&produced, |held: Int| held + 1)
+      next = next + 1
+    }
+    Ok(())
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let wholeCount = Shared.shared(0)
+  let whole = Reader.open(2, &Context.create(), numbers(5, wholeCount))
+  let first = Reader.next(&whole)
+  let others = Reader.rest(&whole)
+  let afterEnd = Reader.next(&whole)
+  Reader.close(&whole)
+
+  let pressureCount = Shared.shared(0)
+  let pressured = Reader.open(1, &Context.create(), numbers(1000, pressureCount))
+  let _taken = Reader.next(&pressured)
+  let _settled = Concurrent.sleep(100)
+  let producedAhead = Shared.current(&pressureCount)
+  Reader.close(&pressured)
+  let afterClose = Reader.next(&pressured)
+
+  let failing = Reader.open(4, &Context.create(), fn(_context: Context.Context, sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+      let _first = sink(1)
+      Messaging.raise("disk full")
+    })
+  let failingItem = Reader.next(&failing)
+  let failure = Reader.next(&failing)
+  let afterFailure = Reader.next(&failing)
+  Reader.close(&failing)
+
+  let crashing = Reader.open(4, &Context.create(), fn(_context: Context.Context, _sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] { panic("producer crashed") })
+  let crashed = Reader.rest(&crashing)
+  Reader.close(&crashing)
+
+  let parent = Context.create()
+  let observed = Shared.shared(false)
+  let watching = Reader.open(1, &parent, fn(context: Context.Context, sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+      let _first = sink(1)
+      Context.pause(&context, 60000) ?
+      Shared.update(&observed, |_held: Bool| true)
+      Ok(())
+    })
+  let _one = Reader.next(&watching)
+  Context.cancel(&parent, "caller left")
+  let cancelled = Reader.next(&watching)
+  Reader.close(&watching)
+
+  let checks = Test.suite("Reader", &[
+      Test.equals("the first item is pulled", &first, &Some(Ok(1))),
+      Test.equals("the rest follow in order", &others, &Ok([2, 3, 4, 5])),
+      Test.equals("a finished reader answers nothing", &afterEnd, &None),
+      Test.that("a full reader holds the producer back", producedAhead <= 3),
+      Test.equals("a closed reader answers nothing", &afterClose, &None),
+      Test.equals("items before a failure are delivered", &failingItem, &Some(Ok(1))),
+      Test.equals("the failure is delivered once", &(failure, afterFailure), &(Some(Err(Messaging.Raised("disk full"))), None)),
+      Test.equals("a crashing producer is reported, not hung on", &crashed, &Err(Messaging.Crashed("producer crashed"))),
+      Test.equals("cancelling the caller's context stops the producer", &cancelled, &Some(Err(Messaging.Cancelled("cancelled: caller left")))),
+      Test.not("the producer never ran past its cancellation", Shared.current(&observed))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

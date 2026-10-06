@@ -1,0 +1,46 @@
+/** @Test.Utils.Erasure.Suite — packed values read back only through their slot */
+module PuduLangMediator.Utils.ErasureTest
+
+import Std.Concurrent as Concurrent
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/// Runs the suite.
+fn main() -> Int {
+  let numbers: Erasure.Slot[Int] = Erasure.slot()
+  let others: Erasure.Slot[Int] = Erasure.slot()
+  let words: Erasure.Slot[Str] = Erasure.slot()
+  let seven = Erasure.pack(&numbers, 7)
+  let word = Erasure.pack(&words, "seven")
+  let pairs: Erasure.Slot[(Int, Str)] = Erasure.slot()
+  let pair = Erasure.pack(&pairs, (1, "one"))
+  var readers: Array[Concurrent.Task] = []
+  var index = 0
+  while index < 8 {
+    let started = Concurrent.start(fn() -> () {
+        var turn = 0
+        while turn < 50 {
+          if Erasure.unpack(&numbers, &seven) != Some(7) { panic("a concurrent read saw another value") }
+          turn = turn + 1
+        }
+      })
+    if let Ok(worker) = started { readers = readers.push(worker) }
+    index = index + 1
+  }
+  let joined = Concurrent.joinAll(&readers)
+  let checks = Test.suite("Utils.Erasure", &[
+      Test.equals("a value reads back through its slot", &Erasure.unpack(&numbers, &seven), &Some(7)),
+      Test.equals("it reads back more than once", &Erasure.unpack(&numbers, &seven), &Some(7)),
+      Test.equals("another slot of the same type does not read it", &Erasure.unpack(&others, &seven), &None),
+      Test.equals("a slot of another type does not read it", &Erasure.unpack(&words, &seven), &None),
+      Test.equals("a slot does not read a value of another slot", &Erasure.unpack(&numbers, &word), &None),
+      Test.equals("a compound value reads back whole", &Erasure.unpack(&pairs, &pair), &Some((1, "one"))),
+      Test.equals("concurrent reads each see their own value", &joined, &Ok(()))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

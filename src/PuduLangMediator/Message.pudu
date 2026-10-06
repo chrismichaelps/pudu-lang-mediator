@@ -1,0 +1,82 @@
+/** @Mediator.Message.Vocabulary — what every kind of message shares */
+module PuduLangMediator.Message
+
+import PuduLangMediator as Messaging
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/** @Mediator.Message.Shape — a request with or without a response, a notification, or a stream */
+export type Shape = Query | Command | Event | Sequence
+
+/** @Mediator.Message.Info — the name, shape, and tags of one kind */
+export type Info = { name: Str, shape: Shape, tags: Array[Str] }
+
+/** @Mediator.Message.Envelope — a message whose type the sender does not name */
+export type Envelope = { info: Info, packed: Erasure.Packed, summary: Str }
+
+/** @Mediator.Message.Fault — why an envelope reached no handler */
+export type Fault = NoRoute(Str) | WrongKind(Str)
+
+/** @Mediator.Message.Delivery — the outcome of an envelope, why there is none, or no listener */
+export type Delivery = Delivered(Erasure.Packed) | Undelivered(Fault) | Unheard
+
+/** @Mediator.Message.Answer — what an envelope's handler answered */
+export type Answer = { info: Info, delivery: Delivery, failed: Bool, summary: Str }
+
+/// Whether the kind carries `tag`.
+export fn hasTag(info: &Info, tag: Str) -> Bool { info.tags.contains(tag) }
+
+/// The shape's name.
+export fn shapeName(shape: &Shape) -> Str {
+  match shape {
+    case Query => "query"
+    case Command => "command"
+    case Event => "event"
+    case Sequence => "sequence"
+  }
+}
+
+/// The failure an undelivered envelope answers, for any error type.
+export fn failureOf[E](fault: &Fault) -> Messaging.Failure[E] {
+  match fault {
+    case NoRoute(name) => Messaging.Unhandled(name)
+    case WrongKind(name) => Messaging.Mismatched(name)
+  }
+}
+
+/// The answer holding `outcome`, readable back only through `outcomes`.
+export fn answered[T, E](info: &Info, outcomes: &Erasure.Slot[Messaging.Outcome[T, E]], outcome: Messaging.Outcome[T, E]) -> Answer {
+  let failed = match outcome {
+    case Ok(_) => false
+    case Err(_) => true
+  }
+  let summary = Messaging.summarize(&outcome)
+  Answer{info: *info, delivery: Delivered(Erasure.pack(outcomes, outcome)), failed: failed, summary: summary}
+}
+
+/// The answer of an envelope that reached no handler.
+export fn undelivered(info: &Info, fault: Fault) -> Answer {
+  let failure: Messaging.Failure[Str] = failureOf(&fault)
+  Answer{info: *info, delivery: Undelivered(fault), failed: true, summary: Messaging.describe(&failure)}
+}
+
+/// The answer of a notification envelope whose kind has no handler: a publication nobody heard.
+export fn unheard(info: &Info) -> Answer {
+  let quiet: Messaging.Outcome[(), Str] = Ok(())
+  Answer{info: *info, delivery: Unheard, failed: false, summary: Messaging.summarize(&quiet)}
+}
+
+/// The outcome an answer holds, read through `outcomes`; `None` when another kind answered it or
+/// nobody heard it.
+export fn read[T, E](outcomes: &Erasure.Slot[Messaging.Outcome[T, E]], answer: &Answer) -> Option[Messaging.Outcome[T, E]] {
+  match answer.delivery {
+    case Delivered(packed) => Erasure.unpack(outcomes, &packed)
+    case Undelivered(fault) => Some(Err(failureOf(&fault)))
+    case Unheard => None
+  }
+}
+
+/// The envelope carrying `message`, readable back only through `messages`.
+export fn sealed[M](info: &Info, messages: &Erasure.Slot[M], message: M) -> Envelope {
+  let summary = show(message)
+  Envelope{info: *info, packed: Erasure.pack(messages, message), summary: summary}
+}

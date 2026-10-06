@@ -1,0 +1,39 @@
+/** @Test.Request.Suite — request kinds, tags, routes, envelopes, and answers */
+module PuduLangMediator.RequestTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/// Runs the suite.
+fn main() -> Int {
+  let lookup: Request.Kind[Int, Str, Str] = Request.kind("users.get")
+  let rename: Request.Kind[Str, (), Str] = Request.command("users.rename")
+  let audited = Request.tagged(&Request.tagged(&lookup, ["audited"]), ["cached"])
+  let route: Request.Route[Int, Str, Str] = Request.route()
+  let sealed = Request.envelope(&lookup, 42)
+  let answered = Message.answered(&lookup.info, &lookup.outcomes, Ok("ada"))
+  let twin: Request.Kind[Int, Str, Str] = Request.kind("users.get")
+  let checks = Test.suite("Request", &[
+      Test.equals("a kind answering a value is a query", &lookup.info, &Message.Info{name: "users.get", shape: Message.Query, tags: []}),
+      Test.equals("a kind answering nothing is a command", &rename.info.shape, &Message.Command),
+      Test.equals("tags accumulate in order", &audited.info.tags, &["audited", "cached"]),
+      Test.equals("a tagged kind is the same kind", &Erasure.unpack(&audited.requests, &sealed.packed), &Some(42)),
+      Test.equals("a fresh route is empty", &(route.handlers.length(), route.behaviors.length(), route.preProcessors.length(), route.postProcessors.length(), route.exceptionHandlers.length(), route.exceptionActions.length()), &(0, 0, 0, 0, 0, 0)),
+      Test.equals("an envelope carries the kind and the request", &(sealed.info.name, sealed.summary), &("users.get", "42")),
+      Test.equals("an envelope does not open for a twin kind", &Erasure.unpack(&twin.requests, &sealed.packed), &None),
+      Test.equals("the kind reads its own answer", &Request.answerOf(&lookup, &answered), &Some(Ok("ada"))),
+      Test.equals("a twin kind does not", &Request.answerOf(&twin, &answered), &None),
+      Test.equals("an unrouted answer reads as unhandled", &Request.answerOf(&lookup, &Message.undelivered(&lookup.info, Message.NoRoute("users.get"))), &Some(
+          Err(Messaging.Unhandled("users.get"))
+        ))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

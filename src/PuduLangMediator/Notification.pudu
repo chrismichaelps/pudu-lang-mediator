@@ -1,0 +1,57 @@
+/** @Mediator.Notification.Kind — notifications delivered to every handler */
+module PuduLangMediator.Notification
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/** @Mediator.Notification.Handler — receives one notification */
+export type Handler[N, E] = fn(N, Context.Context) -> Messaging.Outcome[(), E]
+
+/** @Mediator.Notification.Named — a handler with the name publishers report it by */
+export type Named[N, E] = { name: Str, handle: Handler[N, E] }
+
+/** @Mediator.Notification.Route — every handler registered for one kind */
+export type Route[N, E] = { handlers: Array[Named[N, E]] }
+
+/** @Mediator.Notification.Kind — the typed identity of one notification */
+export type Kind[N, E] = {
+  info: Message.Info,
+  routes: Erasure.Slot[Route[N, E]],
+  invokers: Erasure.Slot[Handler[N, E]],
+  notifications: Erasure.Slot[N],
+  outcomes: Erasure.Slot[Messaging.Outcome[(), E]]
+}
+
+/// A kind of notification whose handlers fail with `E`. Make each kind once and share it.
+export fn kind[N, E](name: Str) -> Kind[N, E] {
+  Kind {
+    info: Message.Info{name: name, shape: Message.Event, tags: []},
+    routes: Erasure.slot(),
+    invokers: Erasure.slot(),
+    notifications: Erasure.slot(),
+    outcomes: Erasure.slot()
+  }
+}
+
+/// The same kind carrying `tags` as well, which open components may read.
+export fn tagged[N, E](subject: &Kind[N, E], tags: Array[Str]) -> Kind[N, E] {
+  Kind{..*subject, info: Message.Info{..subject.info, tags: subject.info.tags.concat(tags)}}
+}
+
+/// A route with no handlers.
+export fn route[N, E]() -> Route[N, E] { Route{handlers: []} }
+
+/// An envelope carrying `notification`, for a publisher that does not name its type.
+export fn envelope[N, E](subject: &Kind[N, E], notification: N) -> Message.Envelope {
+  Message.sealed(&subject.info, &subject.notifications, notification)
+}
+
+/// The outcome an answer holds, when this kind answered it; a publication nobody heard succeeded.
+export fn answerOf[N, E](subject: &Kind[N, E], answer: &Message.Answer) -> Option[Messaging.Outcome[(), E]] {
+  match answer.delivery {
+    case Message.Unheard if answer.info.name == subject.info.name => Some(Ok(()))
+    case _ => Message.read(&subject.outcomes, answer)
+  }
+}

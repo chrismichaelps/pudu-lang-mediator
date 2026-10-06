@@ -1,0 +1,26 @@
+/** @Mediator.Publisher.Seam — what a component that only publishes notifications depends on */
+module PuduLangMediator.Publisher
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+
+/** @Mediator.Publisher.Publisher — publishes notifications; a mediator or a test double */
+export trait Publisher {
+  /// The publication's outcome across every handler.
+  fn publish[N, E](self: &Self, subject: &Notification.Kind[N, E], notification: N, context: Context.Context) -> Messaging.Outcome[(), E]
+  /// The answer to a notification whose type the caller does not name.
+  fn broadcast(self: &Self, envelope: Message.Envelope, context: Context.Context) -> Message.Answer
+}
+
+impl Publisher for Mediator.Mediator {
+  /// `Mediator.publishWith`.
+  fn publish[N, E](self: &Self, subject: &Notification.Kind[N, E], notification: N, context: Context.Context) -> Messaging.Outcome[(), E] {
+    Mediator.publishWith(self, subject, notification, context)
+  }
+
+  /// `Mediator.broadcastWith`.
+  fn broadcast(self: &Self, envelope: Message.Envelope, context: Context.Context) -> Message.Answer { Mediator.broadcastWith(self, envelope, context) }
+}

@@ -1,0 +1,12 @@
+/** @Utils.Threads.Module — what a stopped thread said */
+module PuduLangMediator.Utils.Threads
+
+import Std.Concurrent as Concurrent
+
+/// The message a stopped thread left, or the error itself when it left none.
+export fn reasonOf(problem: &Concurrent.ConcurrentError) -> Str {
+  match problem {
+    case Concurrent.Failed(said) => said
+    case other => show(other)
+  }
+}

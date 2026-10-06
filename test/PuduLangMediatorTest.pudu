@@ -1,0 +1,58 @@
+/** @Test.Root.Suite — outcome helpers, combination, and failure descriptions */
+module PuduLangMediatorTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator as Messaging
+
+/// Runs the suite.
+fn main() -> Int {
+  let broken = Messaging.Violation{property: "name", message: "must not be empty", code: "NotEmpty"}
+  let short = Messaging.Violation{property: "age", message: "must be 18 or more", code: "GreaterThanOrEqual"}
+  let failures: Array[Messaging.Failure[Str]] = [
+    Messaging.Raised("disk"), Messaging.Unhandled("a"), Messaging.Mismatched("b"), Messaging.Refused("no"),
+    Messaging.Invalid([broken, short]), Messaging.Cancelled("stop"), Messaging.Crashed("boom"),
+    Messaging.Aggregate([Messaging.Raised("x"), Messaging.Invalid([short])])
+  ]
+  let succeeded: Messaging.Outcome[Int, Str] = Messaging.succeed(4)
+  let refused: Messaging.Outcome[Int, Str] = Messaging.refuse("closed")
+  let checks = Test.suite("Messaging", &[
+      Test.equals("succeed holds the value", &succeeded, &Ok(4)),
+      Test.equals("raise holds the handler's error", &Messaging.raise("bad"), &Err(Messaging.Raised("bad"))),
+      Test.equals("refuse holds the reason", &refused, &Err(Messaging.Refused("closed"))),
+      Test.equals("lift keeps a value", &Messaging.lift(Ok(2)), &Ok(2)),
+      Test.equals("lift raises an error", &Messaging.lift(Err("e")), &Err(Messaging.Raised("e"))),
+      Test.equals("raised answers only the handler's error", &failures.map(|found: Messaging.Failure[Str]| Messaging.raised(&found)), &[
+          Some("disk"), None, None, None, None, None, None, None
+        ]),
+      Test.equals("only a cancellation is one", &failures.map(|found: Messaging.Failure[Str]| Messaging.isCancellation(&found)), &[
+          false, false, false, false, false, true, false, false
+        ]),
+      Test.equals("violations are read from aggregates too", &failures.map(|found: Messaging.Failure[Str]| Messaging.violations(&found).length()), &[
+          0, 0, 0, 0, 2, 0, 0, 1
+        ]),
+      Test.equals("no failures combine to none", &Messaging.combine([]), &None),
+      Test.equals("one failure combines to itself", &Messaging.combine([Messaging.Raised("a")]), &Some(Messaging.Raised("a"))),
+      Test.equals("several failures combine flat", &Messaging.combine([Messaging.Raised("a"), Messaging.Aggregate([Messaging.Raised("b"), Messaging.Refused("c")])]), &Some(
+          Messaging.Aggregate([Messaging.Raised("a"), Messaging.Raised("b"), Messaging.Refused("c")])
+        )),
+      Test.equals("an aggregate of one combines to that one", &Messaging.combine([Messaging.Aggregate([Messaging.Refused("only")])]), &Some(Messaging.Refused("only"))),
+      Test.equals("every failure is described", &failures.map(|found: Messaging.Failure[Str]| Messaging.describe(&found)), &[
+          "The handler failed: \"disk\"",
+          "No handler is registered for 'a'.",
+          "'b' is registered for another kind of the same name.",
+          "The message was refused: no",
+          "The message is invalid: name: must not be empty; age: must be 18 or more",
+          "The message was cancelled: stop",
+          "A handler stopped its thread: boom",
+          "2 handlers failed: The handler failed: \"x\"; The message is invalid: age: must be 18 or more"
+        ]),
+      Test.equals("a value is summarized", &Messaging.summarize(&succeeded), &"Ok(4)"),
+      Test.equals("a failure is summarized by its description", &Messaging.summarize(&refused), &"The message was refused: closed")
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

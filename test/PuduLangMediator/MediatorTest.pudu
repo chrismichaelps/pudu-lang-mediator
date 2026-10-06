@@ -1,0 +1,133 @@
+/** @Test.Mediator.Suite — building, sending, publishing, streaming, and untyped dispatch */
+module PuduLangMediator.MediatorTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Shared as Shared
+
+/// Runs the suite.
+fn main() -> Int {
+  let greet: Request.Kind[Str, Str, Str] = Request.kind("greet")
+  let forget: Request.Kind[Str, (), Str] = Request.command("forget")
+  let unknown: Request.Kind[Str, Str, Str] = Request.kind("unknown")
+  let twin: Request.Kind[Str, Str, Str] = Request.kind("greet")
+  let joined: Notification.Kind[Str, Str] = Notification.kind("joined")
+  let joinedTwin: Notification.Kind[Str, Str] = Notification.kind("joined")
+  let silent: Notification.Kind[Str, Str] = Notification.kind("silent")
+  let count: Stream.Kind[Int, Int, Str] = Stream.kind("count")
+  let missingStream: Stream.Kind[Int, Int, Str] = Stream.kind("missing")
+  let forgotten = Shared.shared(0)
+  let heard = Shared.shared(0)
+  let built = Mediator.build([
+      Registration.group([
+          Registration.handler(&greet, |name: Str, _context: Context.Context| if name.isEmpty() { Messaging.raise("no name") } else { Ok("hello " + name) }),
+          Registration.handler(&forget, fn(_name: Str, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+              Shared.update(&forgotten, |held: Int| held + 1)
+              Ok(())
+            })
+        ]),
+      Registration.notificationHandler(&joined, "count", fn(_name: Str, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+          Shared.update(&heard, |held: Int| held + 1)
+          Ok(())
+        }),
+      Registration.streamHandler(&count, fn(upTo: Int, context: Context.Context, sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+          var next = 1
+          while next <= upTo {
+            Context.check(&context) ?
+            if !sink(next) { return Ok(()) }
+            next = next + 1
+          }
+          Ok(())
+        })
+    ])
+  let mediator = match built {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let refused = Mediator.build([
+      Registration.handler(&greet, |name: Str, _context: Context.Context| Ok(name)),
+      Registration.handler(&greet, |name: Str, _context: Context.Context| Ok(name)),
+      Registration.handler(&twin, |name: Str, _context: Context.Context| Ok(name)),
+      Registration.behavior(&unknown, fn(_name: Str, context: Context.Context, next: Request.Next[Str, Str]) -> Messaging.Outcome[Str, Str] { next(context) }),
+      Registration.streamHandler(&Stream.kind(""), fn(_request: Int, _context: Context.Context, _sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] { Ok(()) })
+    ])
+  let problems = match refused {
+    case Ok(_) => []
+    case Err(invalid) => invalid.problems
+  }
+  let explained = match refused {
+    case Ok(_) => ""
+    case Err(invalid) => Mediator.explain(&invalid)
+  }
+  let prepared = Mediator.resolve(&mediator, &greet)
+  let preparedAnswer = match prepared {
+    case Ok(invoke) => invoke("prepared", Context.create())
+    case Err(failure) => Err(failure)
+  }
+  let forgot = Mediator.send(&mediator, &forget, "x")
+  let dispatched = Mediator.dispatch(&mediator, Request.envelope(&greet, "envelope"))
+  let unrouted = Mediator.dispatch(&mediator, Request.envelope(&unknown, "x"))
+  let misrouted = Mediator.dispatch(&mediator, Request.envelope(&twin, "x"))
+  let notARequest = Mediator.dispatch(&mediator, Notification.envelope(&joined, "x"))
+  let published = Mediator.publish(&mediator, &joined, "ada")
+  let broadcasted = Mediator.broadcast(&mediator, Notification.envelope(&joined, "grace"))
+  let unheard = Mediator.broadcast(&mediator, Notification.envelope(&silent, "nobody"))
+  let packedItems = Shared.shared([])
+  let streamAnswer = Mediator.streamEnvelope(&mediator, Stream.envelope(&count, 3), Context.create(), fn(packed: fn() -> ()) -> Bool {
+      if let Some(item) = Stream.itemOf(&count, &packed) { Shared.update(&packedItems, |held: Array[Int]| held.push(item)) }
+      true
+    })
+  let wrongShape = Mediator.streamEnvelope(&mediator, Request.envelope(&greet, "x"), Context.create(), |_packed: fn() -> ()| true)
+  let firstTwo = Shared.shared([])
+  let declined = Mediator.stream(&mediator, &count, 10, fn(item: Int) -> Bool {
+      Shared.update(&firstTwo, |held: Array[Int]| held.push(item))
+      item < 2
+    })
+  let stopping = Context.create()
+  Context.cancel(&stopping, "enough")
+  let checks = Test.suite("Mediator", &[
+      Test.equals("a request answers through its handler", &Mediator.send(&mediator, &greet, "ada"), &Ok("hello ada")),
+      Test.equals("a handler's error is raised", &Mediator.send(&mediator, &greet, ""), &Err(Messaging.Raised("no name"))),
+      Test.equals("a command answers nothing and runs once", &(forgot, Shared.current(&forgotten)), &(Ok(()), 1)),
+      Test.equals("a kind without a handler is unhandled", &Mediator.send(&mediator, &unknown, "x"), &Err(Messaging.Unhandled("unknown"))),
+      Test.equals("a twin kind under a registered name is mismatched", &Mediator.send(&mediator, &twin, "x"), &Err(Messaging.Mismatched("greet"))),
+      Test.equals("a resolved pipeline answers like a sent request", &preparedAnswer, &Ok("hello prepared")),
+      Test.equals("resolving an unknown kind is unhandled", &(match Mediator.resolve(&mediator, &unknown) { case Ok(_) => "" case Err(failure) => Messaging.describe(&failure) }), &"No handler is registered for 'unknown'."),
+      Test.equals("every problem is reported at once", &problems, &[
+          "'greet' names two different kinds",
+          "'greet' has 2 handlers; a request or stream takes exactly one",
+          "'unknown' has behaviors or processors but no handler",
+          "a kind is registered without a name"
+        ]),
+      Test.that("the explanation lists them", explained.startsWith("The mediator is invalid: 'greet' names two different kinds; ")),
+      Test.equals("every kind is listed by shape, then registration", &Mediator.kinds(&mediator).map(|info: Message.Info| info.name), &["greet", "forget", "joined", "count"]),
+      Test.equals("an envelope is answered", &(dispatched.failed, dispatched.summary, Request.answerOf(&greet, &dispatched)), &(false, "Ok(\"hello envelope\")", Some(Ok("hello envelope")))),
+      Test.equals("an envelope of an unknown kind is unhandled", &Request.answerOf(&unknown, &unrouted), &Some(Err(Messaging.Unhandled("unknown")))),
+      Test.equals("an envelope of a twin kind is mismatched", &Request.answerOf(&twin, &misrouted), &Some(Err(Messaging.Mismatched("greet")))),
+      Test.that("a notification envelope is not a request", notARequest.failed),
+      Test.equals("a publication reaches the handler", &published, &Ok(())),
+      Test.equals("a broadcast reaches the handler too", &(Notification.answerOf(&joined, &broadcasted), Shared.current(&heard)), &(Some(Ok(())), 2)),
+      Test.equals("a broadcast nobody hears succeeds", &(unheard.failed, Notification.answerOf(&silent, &unheard)), &(false, Some(Ok(())))),
+      Test.equals("publishing a kind with no handlers succeeds", &Mediator.publish(&mediator, &silent, "x"), &Ok(())),
+      Test.equals("publishing a twin kind is mismatched", &Mediator.publish(&mediator, &joinedTwin, "x"), &Err(Messaging.Mismatched("joined"))),
+      Test.equals("a stream is collected", &Mediator.collect(&mediator, &count, 4), &Ok([1, 2, 3, 4])),
+      Test.equals("a stream stops when the sink declines", &(declined, Shared.current(&firstTwo)), &(Ok(()), [1, 2])),
+      Test.equals("a cancelled stream stops", &Mediator.streamWith(&mediator, &count, 3, stopping, |_item: Int| true), &Err(Messaging.Cancelled("cancelled: enough"))),
+      Test.equals("a stream without a handler is unhandled", &Mediator.collect(&mediator, &missingStream, 1), &Err(Messaging.Unhandled("missing"))),
+      Test.equals("an untyped stream hands packed items", &(Shared.current(&packedItems), Stream.answerOf(&count, &streamAnswer)), &([1, 2, 3], Some(Ok(())))),
+      Test.that("a request envelope is not a stream", wrongShape.failed)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

@@ -1,0 +1,47 @@
+/** @Test.Catalog.Suite — gathering routes, counting registrations, and finding problems */
+module PuduLangMediator.CatalogTest
+
+import Std.HashMap as HashMap
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Catalog as Catalog
+import PuduLangMediator.Compose as Compose
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Domain.Order as Order
+import PuduLangMediator as Messaging
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/// Runs the suite.
+fn main() -> Int {
+  let lookup: Request.Kind[Int, Int, Str] = Request.kind("lookup")
+  let twin: Request.Kind[Int, Int, Str] = Request.kind("lookup")
+  let catalog = Catalog.empty(Publishing.Sequential{}, Catalog.ForUnhandled)
+  let addBehavior = fn(route: Request.Route[Int, Int, Str]) -> Request.Route[Int, Int, Str] {
+    Request.Route{..route, behaviors: route.behaviors.push(fn(_request: Int, context: Context.Context, next: Request.Next[Int, Str]) -> Messaging.Outcome[Int, Str] { next(context) })}
+  }
+  let once = Catalog.touch(&catalog.requests, &lookup.info, &lookup.routes, Request.route(), addBehavior, 0, 1, Compose.requestFinish(lookup))
+  let twice = Catalog.touch(&once, &lookup.info, &lookup.routes, Request.route(), addBehavior, 0, 1, Compose.requestFinish(lookup))
+  let collided = Catalog.touch(&twice, &twin.info, &twin.routes, Request.route(), addBehavior, 1, 0, Compose.requestFinish(twin))
+  let entry = HashMap.get(&collided, &"lookup")
+  let routed = match entry {
+    case Some(found) => Erasure.unpack(&lookup.routes, &found.route)
+    case None => None
+  }
+  let marked = Catalog.marked(catalog, Order.Behaviors, "lookup")
+  let checks = Test.suite("Catalog", &[
+      Test.equals("a fresh catalog has nothing", &(HashMap.size(&catalog.requests), catalog.assembly.marks.length()), &(0, 0)),
+      Test.equals("registrations accumulate on one route", &(match routed { case Some(route) => route.behaviors.length() case None => 0 }), &2),
+      Test.equals("handlers and components are counted", &(match entry { case Some(found) => (found.handlers, found.components, found.collisions) case None => (0, 0, 0) }), &(0, 2, 1)),
+      Test.equals("a mark records the layer and the kind", &marked.assembly.marks, &[Order.Closed(Order.Behaviors, "lookup")]),
+      Test.equals("problems name the collision and the missing handler", &Catalog.problems(&Catalog.Catalog{..catalog, requests: collided}), &[
+          "'lookup' names two different kinds", "'lookup' has behaviors or processors but no handler"
+        ])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

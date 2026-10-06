@@ -1,0 +1,87 @@
+/** @Mediator.Reader.Puller — a stream read one item at a time while another thread produces it */
+module PuduLangMediator.Reader
+
+import Std.Channel as Channel
+import Std.Concurrent.Cancel as Cancel
+import Std.Concurrent as Concurrent
+import Std.Math as Math
+import Std.Sync as Sync
+import PuduLangMediator.Constants.Messages as Messages
+import PuduLangMediator.Context as Context
+import PuduLangMediator as Messaging
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Threads as Threads
+
+/** @Mediator.Reader.Step — one item, or the end of the stream with its outcome */
+export type Step[T, E] = Item(T) | Finished(Messaging.Outcome[(), E])
+
+/** @Mediator.Reader.Reader — the consuming end of a stream produced on its own thread */
+export type Reader[T, E] = {
+  channel: Channel.Channel[Step[T, E]],
+  context: Context.Context,
+  worker: Option[Concurrent.Task],
+  done: Sync.Cell[Bool]
+}
+
+/// A reader of what `produce` emits on a thread of its own, holding at most `capacity` items
+/// (at least one) ahead of the consumer. The producer waits while the reader is full and stops
+/// once the reader is closed or `context` is cancelled.
+export fn open[T, E](capacity: Int, context: &Context.Context, produce: fn(Context.Context, Stream.Sink[T]) -> Messaging.Outcome[(), E]) -> Reader[T, E] {
+  let channel: Channel.Channel[Step[T, E]] = Channel.channel(Math.max(capacity, 1))
+  let own = Context.withToken(context, Cancel.child(&context.token))
+  let started = Concurrent.start(fn() -> () {
+      let result: Sync.Cell[Option[Messaging.Outcome[(), E]]] = Sync.cell(None)
+      let sink = fn(item: T) -> Bool { !Context.stopped(&own) && Channel.send(&channel, Item(item)) == Ok(()) }
+      let ran = Concurrent.contain(fn() -> () { let _stored = Sync.set(&result, Some(produce(own, sink))) })
+      let outcome = match (Sync.get(&result), ran) {
+        case (Ok(Some(found)), _) => found
+        case (_, Err(problem)) => Err(Messaging.Crashed(Threads.reasonOf(&problem)))
+        case _ => Err(Messaging.Crashed(Messages.READER_CLOSED))
+      }
+      let _ended = Channel.send(&channel, Finished(outcome))
+    })
+  match started {
+    case Ok(worker) => Reader{channel: channel, context: own, worker: Some(worker), done: Sync.cell(false)}
+    case Err(problem) => {
+      let _ended = Channel.send(&channel, Finished(Err(Messaging.Crashed(Threads.reasonOf(&problem)))))
+      Reader{channel: channel, context: own, worker: None, done: Sync.cell(false)}
+    }
+  }
+}
+
+/// The next item, waiting for the producer when none is ready; the stream's failure once, when
+/// it ended with one; and `None` after it ended or the reader was closed.
+export fn next[T, E](reader: &Reader[T, E]) -> Option[Messaging.Outcome[T, E]] {
+  if Sync.get(&reader.done) == Ok(true) { return None }
+  match Channel.receive(&reader.channel) {
+    case Ok(Some(Item(item))) => Some(Ok(item))
+    case Ok(Some(Finished(Err(failure)))) => {
+      finish(reader)
+      Some(Err(failure))
+    }
+    case _ => {
+      finish(reader)
+      None
+    }
+  }
+}
+
+/// Every item still to come, or the stream's failure.
+export fn rest[T, E](reader: &Reader[T, E]) -> Messaging.Outcome[Array[T], E] {
+  var items: Array[T] = []
+  while let Some(step) = next(reader) {
+    items = items.push(step ?)
+  }
+  Ok(items)
+}
+
+/// Stops the producer, discards what it had produced, and waits for its thread to end.
+export fn close[T, E](reader: &Reader[T, E]) -> () {
+  Context.cancel(&reader.context, Messages.READER_CLOSED)
+  let _closed = Channel.close(&reader.channel)
+  if let Some(worker) = reader.worker { let _joined = Concurrent.join(&worker) }
+  finish(reader)
+}
+
+/// Marks the reader as ended.
+fn finish[T, E](reader: &Reader[T, E]) -> () { let _marked = Sync.set(&reader.done, true) }

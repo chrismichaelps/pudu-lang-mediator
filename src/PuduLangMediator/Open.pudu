@@ -1,0 +1,47 @@
+/** @Mediator.Open.Seam — components that apply to every kind of message */
+module PuduLangMediator.Open
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+
+/** @Mediator.Open.Behavior — wraps the pipeline of every request */
+export trait Behavior {
+  /// Runs `next`, or answers in its place, for any request.
+  fn handleRequest[Q, R, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E]
+}
+
+/** @Mediator.Open.PreProcessor — runs before the handler of every request */
+export trait PreProcessor {
+  /// `Ok` to let the request continue; a failure stops it.
+  fn beforeRequest[Q, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E]
+}
+
+/** @Mediator.Open.PostProcessor — runs after the handler of every request */
+export trait PostProcessor {
+  /// `Ok` to let the response through; a failure replaces it.
+  fn afterRequest[Q, R, E](self: &Self, request: &Q, response: &R, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E]
+}
+
+/** @Mediator.Open.ExceptionAction — observes the failure of every request */
+export trait ExceptionAction {
+  /// Observes a failure that keeps propagating after every action has run.
+  fn onFailure[Q, E](self: &Self, request: &Q, failure: &Messaging.Failure[E], info: &Message.Info, context: Context.Context) -> ()
+}
+
+/** @Mediator.Open.NotificationHandler — receives every notification */
+export trait NotificationHandler {
+  /// Receives one notification of any kind.
+  fn handleNotification[N, E](self: &Self, notification: &N, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E]
+}
+
+/** @Mediator.Open.StreamBehavior — wraps the pipeline of every stream */
+export trait StreamBehavior {
+  /// Runs `next` with this sink or one wrapping it, or answers in its place, for any stream.
+  fn handleStream[Q, T, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, sink: Stream.Sink[T], next: Stream.Next[T, E]) -> Messaging.Outcome[(), E]
+}
+
+/** @Mediator.Open.Listener — an open notification handler and the name it is reported by */
+export type Listener = { name: Str, handler: dynamic NotificationHandler }

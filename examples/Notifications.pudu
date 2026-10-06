@@ -1,0 +1,34 @@
+/** @Examples.Notifications.Program — one notification, several handlers, four publishing strategies */
+module Notifications
+
+import Std.Io as Io
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Registration as Registration
+
+/// Publishes the same sign-up through each publishing strategy and prints what each answered.
+fn main() -> Int {
+  let joined: Notification.Kind[Str, Str] = Notification.kind("users.joined")
+  let registrations = [
+    Registration.notificationHandler(&joined, "welcome email", |name: Str, _context: Context.Context| Ok(())),
+    Registration.notificationHandler(&joined, "crm sync", |name: Str, _context: Context.Context| Messaging.raise("crm is down")),
+    Registration.notificationHandler(&joined, "analytics", |name: Str, _context: Context.Context| Ok(()))
+  ]
+  let strategies: Array[(Str, dynamic Publishing.Strategy)] = [
+    ("sequential", Publishing.Sequential{}), ("continuing", Publishing.Continuing{}), ("parallel", Publishing.Parallel{}), ("bounded", Publishing.Bounded{workers: 2})
+  ]
+  var outcomes: Array[Messaging.Outcome[(), Str]] = []
+  for (name, strategy) in strategies {
+    let mediator = match Mediator.buildWith(&Mediator.Options{..Mediator.defaults(), publisher: strategy}, registrations) {
+      case Ok(found) => found
+      case Err(invalid) => panic(Mediator.explain(&invalid))
+    }
+    let outcome = Mediator.publish(&mediator, &joined, "ada")
+    let _said = Io.writeLine(name + ": " + Messaging.summarize(&outcome))
+    outcomes = outcomes.push(outcome)
+  }
+  if outcomes.length() == 4 && outcomes.filter(|outcome: Messaging.Outcome[(), Str]| outcome == Err(Messaging.Raised("crm is down"))).length() == 4 { 0 } else { 1 }
+}

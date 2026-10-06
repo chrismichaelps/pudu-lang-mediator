@@ -1,0 +1,53 @@
+/** @Constants.Messages.Module — every sentence the package reports */
+module PuduLangMediator.Constants.Messages
+
+/// A failure raised by a handler; `<1>` is the error.
+export const RAISED: Str = "The handler failed: <1>"
+
+/// A message without a handler; `<1>` is its kind's name.
+export const UNHANDLED: Str = "No handler is registered for '<1>'."
+
+/// A message routed to another kind of the same name; `<1>` is the name.
+export const MISMATCHED: Str = "'<1>' is registered for another kind of the same name."
+
+/// A message an open component refused; `<1>` is the reason.
+export const REFUSED: Str = "The message was refused: <1>"
+
+/// A message that failed validation; `<1>` is its violations.
+export const INVALID: Str = "The message is invalid: <1>"
+
+/// One validation violation; `<1>` is the property and `<2>` the message.
+export const VIOLATION: Str = "<1>: <2>"
+
+/// A cancellation; `<1>` is its reason.
+export const CANCELLED: Str = "The message was cancelled: <1>"
+
+/// A handler that stopped its thread; `<1>` is what it said.
+export const CRASHED: Str = "A handler stopped its thread: <1>"
+
+/// Several failures of one publication; `<1>` is their count and `<2>` their descriptions.
+export const AGGREGATE: Str = "<1> handlers failed: <2>"
+
+/// An outcome holding a value; `<1>` is the value.
+export const SUCCEEDED: Str = "Ok(<1>)"
+
+/// A mediator refused at build time; `<1>` is its problems.
+export const MEDIATOR_INVALID: Str = "The mediator is invalid: <1>"
+
+/// A kind registered without a name.
+export const EMPTY_NAME: Str = "a kind is registered without a name"
+
+/// Two kinds sharing one name; `<1>` is the name.
+export const NAME_TAKEN: Str = "'<1>' names two different kinds"
+
+/// A request or stream kind with more than one handler; `<1>` is its name and `<2>` the count.
+export const DUPLICATE_HANDLER: Str = "'<1>' has <2> handlers; a request or stream takes exactly one"
+
+/// A request or stream kind with components but no handler; `<1>` is its name.
+export const WITHOUT_HANDLER: Str = "'<1>' has behaviors or processors but no handler"
+
+/// A stream reader closed before its stream ended.
+export const READER_CLOSED: Str = "the stream reader was closed"
+
+/// What separates problems and descriptions listed in one sentence.
+export const SEPARATOR: Str = "; "
