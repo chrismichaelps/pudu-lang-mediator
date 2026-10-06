@@ -1,0 +1,68 @@
+/** @Examples.PipelineBehaviors.Program — open and per-kind behaviors, pre- and post-processors */
+module PipelineBehaviors
+
+import Std.Io as Io
+import Std.Time as Time
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Open as Open
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+
+/** @Examples.PipelineBehaviors.Timing — an open behavior that times every request */
+type Timing = {}
+
+impl Open.Behavior for Timing {
+  /// Prints how long the rest of the pipeline took.
+  fn handleRequest[Q, R, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    let began = Time.elapsed()
+    let outcome = next(context)
+    let _said = Io.writeLine(info.name + " took " + show(Time.elapsed() - began) + " ms")
+    outcome
+  }
+}
+
+/** @Examples.PipelineBehaviors.Audit — an open pre-processor that prints every request */
+type Audit = {}
+
+impl Open.PreProcessor for Audit {
+  /// Prints the request before its handler runs.
+  fn beforeRequest[Q, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] {
+    let _said = Io.writeLine("audit: " + info.name + " " + show(*request))
+    Ok(())
+  }
+}
+
+/// Builds a pipeline around one query and sends it three times.
+fn main() -> Int {
+  let quote: Request.Kind[Str, Int, Str] = Request.kind("prices.quote")
+  let cache: Context.Key[Int] = Context.key("cached")
+  let built = Mediator.build([
+      Registration.openBehavior(Timing{}),
+      Registration.openPreProcessor(Audit{}),
+      Registration.behavior(&quote, fn(item: Str, context: Context.Context, next: Request.Next[Int, Str]) -> Messaging.Outcome[Int, Str] {
+          if item == "free sample" { Ok(0) } else { next(context) }
+        }),
+      Registration.postProcessor(&quote, fn(item: Str, price: Int, context: Context.Context) -> Messaging.Outcome[(), Str] {
+          Context.set(&context, &cache, price)
+          let _said = Io.writeLine("cached " + item + " at " + show(price))
+          Ok(())
+        }),
+      Registration.handler(&quote, |item: Str, _context: Context.Context| if item == "tea" { Ok(4) } else { Messaging.raise("no price for " + item) })
+    ])
+  let mediator = match built {
+    case Ok(found) => found
+    case Err(invalid) => {
+      let _said = Io.writeErrorLine(Mediator.explain(&invalid))
+      return 1
+    }
+  }
+  let context = Context.create()
+  let tea = Mediator.sendWith(&mediator, &quote, "tea", context)
+  let sample = Mediator.send(&mediator, &quote, "free sample")
+  let gold = Mediator.send(&mediator, &quote, "gold")
+  let _said = Io.writeLine(Messaging.summarize(&gold))
+  if tea == Ok(4) && sample == Ok(0) && Context.get(&context, &cache) == Some(4) && gold == Err(Messaging.Raised("no price for gold")) { 0 } else { 1 }
+}

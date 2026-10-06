@@ -1,0 +1,133 @@
+/** @Test.Integration.OrderingScenario.Suite — one shop wired through every part of the mediator */
+module Integration.OrderingScenarioTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangLog.Configuration as Configuration
+import PuduLangLog as Log
+import PuduLangLog.Sinks.Memory as Memory
+import PuduLangMediator.Behaviors.Logging as Logging
+import PuduLangMediator.Behaviors.Validation as Validation
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Reader as Reader
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Sender as Sender
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Shared as Shared
+import PuduLangValidator.Rule as Rule
+import PuduLangValidator.Rules.Number as NumberRule
+import PuduLangValidator.Validator as Validator
+
+/** @Test.Integration.OrderingScenario.PlaceOrder — a command that places an order */
+type PlaceOrder = { item: Str, quantity: Int }
+
+/** @Test.Integration.OrderingScenario.Placed — the notification an order raises */
+type Placed = { id: Int, item: Str }
+
+/** @Test.Integration.OrderingScenario.Shop — the shop's message kinds */
+type Shop = {
+  place: Request.Kind[PlaceOrder, Int, Str],
+  find: Request.Kind[Int, Str, Str],
+  placed: Notification.Kind[Placed, Str],
+  history: Stream.Kind[(), Placed, Str]
+}
+
+/// The shop's kinds, made once.
+fn shop() -> Shop {
+  Shop{place: Request.kind("orders.place"), find: Request.kind("orders.find"), placed: Notification.kind("orders.placed"), history: Stream.kind("orders.history")}
+}
+
+/// The rules an order must keep.
+fn orderRules() -> Validator.Validator[PlaceOrder] {
+  Validator.add(Validator.create(), Rule.build(NumberRule.greaterThan(Rule.ruleFor("quantity", |order: PlaceOrder| order.quantity), 0)))
+}
+
+/// A checkout that only sends.
+fn checkout(sender: dynamic Sender.Sender, kinds: &Shop, item: Str, quantity: Int) -> Messaging.Outcome[Int, Str] {
+  sender.send(&kinds.place, PlaceOrder{item: item, quantity: quantity}, Context.create())
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let kinds = shop()
+  let orders: Shared.Shared[Array[Placed]] = Shared.shared([])
+  let emails: Shared.Shared[Array[Str]] = Shared.shared([])
+  let stock: Shared.Shared[Int] = Shared.shared(10)
+  let memory = Memory.create()
+  let recorder = Logging.of(Configuration.create().minimumLevel(Log.Debug).writeTo(Memory.sink(&memory)).createLogger())
+  let placed = kinds.placed
+  let late: Shared.Shared[Option[Mediator.Mediator]] = Shared.shared(None)
+  let built = Mediator.buildWith(&Mediator.Options{..Mediator.defaults(), publisher: Publishing.Parallel{}}, [
+      Registration.openBehavior(recorder),
+      Validation.register(&kinds.place, orderRules()),
+      Registration.handler(&kinds.place, fn(order: PlaceOrder, context: Context.Context) -> Messaging.Outcome[Int, Str] {
+          let left = Shared.change(&stock, fn(held: Int) -> (Int, Int) { if held >= order.quantity { (held - order.quantity, held - order.quantity) } else { (held, 0 - 1) } })
+          if left < 0 { return Messaging.raise("out of stock") }
+          let id = Shared.change(&orders, fn(held: Array[Placed]) -> (Array[Placed], Int) {
+              let next = Placed{id: held.length() + 1, item: order.item}
+              (held.push(next), next.id)
+            })
+          Ok(id)
+        }),
+      Registration.postProcessor(&kinds.place, fn(order: PlaceOrder, id: Int, context: Context.Context) -> Messaging.Outcome[(), Str] {
+          match Shared.current(&late) {
+            case Some(itself) => Mediator.publishWith(&itself, &placed, Placed{id: id, item: order.item}, context)
+            case None => Messaging.refuse("the mediator is not built yet")
+          }
+        }),
+      Registration.handler(&kinds.find, fn(id: Int, _context: Context.Context) -> Messaging.Outcome[Str, Str] {
+          match Shared.current(&orders).filter(|order: Placed| order.id == id) {
+            case [order] => Ok(order.item)
+            case _ => Messaging.raise("no order " + show(id))
+          }
+        }),
+      Registration.notificationHandler(&kinds.placed, "email", fn(order: Placed, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+          Shared.update(&emails, |held: Array[Str]| held.push("order " + show(order.id)))
+          Ok(())
+        }),
+      Registration.streamHandler(&kinds.history, fn(_all: (), context: Context.Context, sink: Stream.Sink[Placed]) -> Messaging.Outcome[(), Str] {
+          for order in Shared.current(&orders) {
+            Context.check(&context) ?
+            if !sink(order) { return Ok(()) }
+          }
+          Ok(())
+        })
+    ])
+  let mediator = match built {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  Shared.update(&late, |_none: Option[Mediator.Mediator]| Some(mediator))
+  let sender: dynamic Sender.Sender = mediator
+  let first = checkout(sender, &kinds, "tea", 2)
+  let second = checkout(sender, &kinds, "cups", 3)
+  let invalid = checkout(sender, &kinds, "spoons", 0)
+  let tooMany = checkout(sender, &kinds, "pots", 50)
+  let published = Mediator.publish(&mediator, &placed, Placed{id: 99, item: "manual"})
+  let found = Mediator.send(&mediator, &kinds.find, 2)
+  let answer = Mediator.dispatch(&mediator, Request.envelope(&kinds.find, 1))
+  let history = Mediator.reader(&mediator, &kinds.history, (), &Context.create(), 1)
+  let firstOrder = Reader.next(&history)
+  Reader.close(&history)
+  let checks = Test.suite("Integration.OrderingScenario", &[
+      Test.equals("orders are placed with increasing ids", &(first, second), &(Ok(1), Ok(2))),
+      Test.equals("an invalid order is refused before the handler", &(match invalid { case Err(failure) => Messaging.violations(&failure).map(|one: Messaging.Violation| one.property) case Ok(_) => [] }), &["quantity"]),
+      Test.equals("an order beyond the stock fails in the handler", &tooMany, &Err(Messaging.Raised("out of stock"))),
+      Test.equals("only valid orders took stock", &Shared.current(&stock), &5),
+      Test.equals("every placed order and a published notification reach the handler", &(published, Shared.current(&emails)), &(Ok(()), ["order 1", "order 2", "order 99"])),
+      Test.equals("a query finds an order", &found, &Ok("cups")),
+      Test.equals("an untyped query is answered", &Request.answerOf(&kinds.find, &answer), &Some(Ok("tea"))),
+      Test.equals("history is read one order at a time", &firstOrder, &Some(Ok(Placed{id: 1, item: "tea"}))),
+      Test.equals("every request was logged once at its start", &Memory.withTemplate(&memory, Logging.STARTED).length(), &6)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

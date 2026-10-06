@@ -1,0 +1,186 @@
+/** @Mediator.Registration.Builder — the handlers and components a mediator is built from */
+module PuduLangMediator.Registration
+
+import PuduLangMediator.Catalog as Catalog
+import PuduLangMediator.Compose as Compose
+import PuduLangMediator.Domain.Order as Order
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Open as Open
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+
+/** @Mediator.Registration.Registration — one change to the catalog a mediator is built from */
+export type Registration = { apply: fn(Catalog.Catalog) -> Catalog.Catalog }
+
+/// The handler of a request kind. A request kind takes exactly one.
+export fn handler[Q, R, E](subject: &Request.Kind[Q, R, E], handle: Request.Handler[Q, R, E]) -> Registration {
+  requestChange(subject, 1, 0, None, fn(route: Request.Route[Q, R, E]) -> Request.Route[Q, R, E] {
+      Request.Route{..route, handlers: route.handlers.push(handle)}
+    })
+}
+
+/// A behavior around the pipeline of one request kind, ordered among every behavior by registration.
+export fn behavior[Q, R, E](subject: &Request.Kind[Q, R, E], wrap: Request.Behavior[Q, R, E]) -> Registration {
+  requestChange(subject, 0, 1, Some(Order.Behaviors), fn(route: Request.Route[Q, R, E]) -> Request.Route[Q, R, E] {
+      Request.Route{..route, behaviors: route.behaviors.push(wrap)}
+    })
+}
+
+/// A pre-processor of one request kind, ordered among every pre-processor by registration.
+export fn preProcessor[Q, R, E](subject: &Request.Kind[Q, R, E], process: Request.PreProcessor[Q, E]) -> Registration {
+  requestChange(subject, 0, 1, Some(Order.PreProcessors), fn(route: Request.Route[Q, R, E]) -> Request.Route[Q, R, E] {
+      Request.Route{..route, preProcessors: route.preProcessors.push(process)}
+    })
+}
+
+/// A post-processor of one request kind, ordered among every post-processor by registration.
+export fn postProcessor[Q, R, E](subject: &Request.Kind[Q, R, E], process: Request.PostProcessor[Q, R, E]) -> Registration {
+  requestChange(subject, 0, 1, Some(Order.PostProcessors), fn(route: Request.Route[Q, R, E]) -> Request.Route[Q, R, E] {
+      Request.Route{..route, postProcessors: route.postProcessors.push(process)}
+    })
+}
+
+/// An exception handler of one request kind; the kind's exception handlers are tried in registration order.
+export fn exceptionHandler[Q, R, E](subject: &Request.Kind[Q, R, E], recover: Request.ExceptionHandler[Q, R, E]) -> Registration {
+  requestChange(subject, 0, 1, None, fn(route: Request.Route[Q, R, E]) -> Request.Route[Q, R, E] {
+      Request.Route{..route, exceptionHandlers: route.exceptionHandlers.push(recover)}
+    })
+}
+
+/// An exception action of one request kind, ordered among every exception action by registration.
+export fn exceptionAction[Q, R, E](subject: &Request.Kind[Q, R, E], act: Request.ExceptionAction[Q, E]) -> Registration {
+  requestChange(subject, 0, 1, Some(Order.ExceptionActions), fn(route: Request.Route[Q, R, E]) -> Request.Route[Q, R, E] {
+      Request.Route{..route, exceptionActions: route.exceptionActions.push(act)}
+    })
+}
+
+/// A handler of a notification kind, reported to publishing strategies as `name`. A notification
+/// kind takes any number, ordered among every notification handler by registration.
+export fn notificationHandler[N, E](subject: &Notification.Kind[N, E], name: Str, handle: Notification.Handler[N, E]) -> Registration {
+  let held = *subject
+  let named = Notification.Named{name: name, handle: handle}
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let table = Catalog.touch(&catalog.notifications, &held.info, &held.routes, Notification.route(), fn(route: Notification.Route[N, E]) -> Notification.Route[N, E] {
+          Notification.Route{handlers: route.handlers.push(named)}
+        }, 1, 0, Compose.notificationFinish(held))
+      Catalog.marked(Catalog.Catalog{..catalog, notifications: table}, Order.NotificationHandlers, held.info.name)
+    } }
+}
+
+/// The handler of a stream kind. A stream kind takes exactly one.
+export fn streamHandler[Q, T, E](subject: &Stream.Kind[Q, T, E], handle: Stream.Handler[Q, T, E]) -> Registration {
+  streamChange(subject, 1, 0, None, fn(route: Stream.Route[Q, T, E]) -> Stream.Route[Q, T, E] {
+      Stream.Route{..route, handlers: route.handlers.push(handle)}
+    })
+}
+
+/// A behavior around the pipeline of one stream kind, ordered among every stream behavior by registration.
+export fn streamBehavior[Q, T, E](subject: &Stream.Kind[Q, T, E], wrap: Stream.Behavior[Q, T, E]) -> Registration {
+  streamChange(subject, 0, 1, Some(Order.StreamBehaviors), fn(route: Stream.Route[Q, T, E]) -> Stream.Route[Q, T, E] {
+      Stream.Route{..route, behaviors: route.behaviors.push(wrap)}
+    })
+}
+
+/// A behavior around the pipeline of every request kind.
+export fn openBehavior(open: dynamic Open.Behavior) -> Registration {
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let held = catalog.assembly
+      let mark = Order.Open(Order.Behaviors, held.behaviors.length())
+      Catalog.Catalog{..catalog, assembly: Catalog.Assembly{..held, behaviors: held.behaviors.push(open), marks: held.marks.push(mark)}}
+    } }
+}
+
+/// A pre-processor of every request kind.
+export fn openPreProcessor(open: dynamic Open.PreProcessor) -> Registration {
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let held = catalog.assembly
+      let mark = Order.Open(Order.PreProcessors, held.preProcessors.length())
+      Catalog.Catalog{..catalog, assembly: Catalog.Assembly{..held, preProcessors: held.preProcessors.push(open), marks: held.marks.push(mark)}}
+    } }
+}
+
+/// A post-processor of every request kind.
+export fn openPostProcessor(open: dynamic Open.PostProcessor) -> Registration {
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let held = catalog.assembly
+      let mark = Order.Open(Order.PostProcessors, held.postProcessors.length())
+      Catalog.Catalog{..catalog, assembly: Catalog.Assembly{..held, postProcessors: held.postProcessors.push(open), marks: held.marks.push(mark)}}
+    } }
+}
+
+/// An exception action of every request kind.
+export fn openExceptionAction(open: dynamic Open.ExceptionAction) -> Registration {
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let held = catalog.assembly
+      let mark = Order.Open(Order.ExceptionActions, held.exceptionActions.length())
+      Catalog.Catalog{..catalog, assembly: Catalog.Assembly{..held, exceptionActions: held.exceptionActions.push(open), marks: held.marks.push(mark)}}
+    } }
+}
+
+/// A handler of every notification kind, reported to publishing strategies as `name`. An envelope
+/// reaches it only when its kind is registered with the mediator.
+export fn openNotificationHandler(name: Str, open: dynamic Open.NotificationHandler) -> Registration {
+  let listener = Open.Listener{name: name, handler: open}
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let held = catalog.assembly
+      let mark = Order.Open(Order.NotificationHandlers, held.listeners.length())
+      Catalog.Catalog{..catalog, assembly: Catalog.Assembly{..held, listeners: held.listeners.push(listener), marks: held.marks.push(mark)}}
+    } }
+}
+
+/// A behavior around the pipeline of every stream kind.
+export fn openStreamBehavior(open: dynamic Open.StreamBehavior) -> Registration {
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let held = catalog.assembly
+      let mark = Order.Open(Order.StreamBehaviors, held.streamBehaviors.length())
+      Catalog.Catalog{..catalog, assembly: Catalog.Assembly{..held, streamBehaviors: held.streamBehaviors.push(open), marks: held.marks.push(mark)}}
+    } }
+}
+
+/// Several registrations as one, applied in order.
+export fn group(registrations: Array[Registration]) -> Registration {
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      var changed = catalog
+      for registration in registrations { changed = (registration.apply)(changed) }
+      changed
+    } }
+}
+
+/// A change to one request kind's route that adds `handlers` and `components`, marked in `layer`
+/// when its order among other kinds' components matters.
+fn requestChange[Q, R, E](
+  subject: &Request.Kind[Q, R, E],
+  handlers: Int,
+  components: Int,
+  layer: Option[Order.Layer],
+  change: fn(Request.Route[Q, R, E]) -> Request.Route[Q, R, E]
+) -> Registration {
+  let held = *subject
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let table = Catalog.touch(&catalog.requests, &held.info, &held.routes, Request.route(), change, handlers, components, Compose.requestFinish(held))
+      let updated = Catalog.Catalog{..catalog, requests: table}
+      match layer {
+        case Some(at) => Catalog.marked(updated, at, held.info.name)
+        case None => updated
+      }
+    } }
+}
+
+/// A change to one stream kind's route, as `requestChange` is for requests.
+fn streamChange[Q, T, E](
+  subject: &Stream.Kind[Q, T, E],
+  handlers: Int,
+  components: Int,
+  layer: Option[Order.Layer],
+  change: fn(Stream.Route[Q, T, E]) -> Stream.Route[Q, T, E]
+) -> Registration {
+  let held = *subject
+  Registration{apply: fn(catalog: Catalog.Catalog) -> Catalog.Catalog {
+      let table = Catalog.touch(&catalog.streams, &held.info, &held.routes, Stream.route(), change, handlers, components, Compose.streamFinish(held))
+      let updated = Catalog.Catalog{..catalog, streams: table}
+      match layer {
+        case Some(at) => Catalog.marked(updated, at, held.info.name)
+        case None => updated
+      }
+    } }
+}

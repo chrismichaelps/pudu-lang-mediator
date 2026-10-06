@@ -1,0 +1,50 @@
+/** @Examples.Integrations.Program — validation, structured logging, and resilience as behaviors */
+module Integrations
+
+import Std.Io as Io
+import PuduLangLog.Configuration as Configuration
+import PuduLangLog as Log
+import PuduLangLog.Sinks.Console as Console
+import PuduLangMediator.Behaviors.Logging as Logging
+import PuduLangMediator.Behaviors.Resilient as Resilient
+import PuduLangMediator.Behaviors.Validation as Validation
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Utils.Shared as Shared
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience.Retry as Retry
+import PuduLangValidator.Rule as Rule
+import PuduLangValidator.Rules.Text as TextRule
+import PuduLangValidator.Validator as Validator
+
+/// Validates, logs, and retries one flaky lookup.
+fn main() -> Int {
+  let lookup: Request.Kind[Str, Str, Str] = Request.kind("accounts.lookup")
+  let logger = Configuration.create().minimumLevel(Log.Information).writeTo(Console.sink(Console.defaults())).createLogger()
+  let rules = Validator.add(Validator.create(), Rule.build(TextRule.notEmpty(Rule.ruleFor("email", |email: Str| email))))
+  let retrying = match Pipeline.build([Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 2, delay: 10})]) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+  let calls = Shared.shared(0)
+  let built = Mediator.build([
+      Registration.openBehavior(Logging.of(logger)),
+      Validation.register(&lookup, rules),
+      Resilient.register(&lookup, retrying),
+      Registration.handler(&lookup, fn(email: Str, _context: Context.Context) -> Messaging.Outcome[Str, Str] {
+          let made = Shared.change(&calls, fn(count: Int) -> (Int, Int) { (count + 1, count + 1) })
+          if made < 2 { Messaging.raise("connection reset") } else { Ok("account of " + email) }
+        })
+    ])
+  let mediator = match built {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let found = Mediator.send(&mediator, &lookup, "ada@example.com")
+  let refused = Mediator.send(&mediator, &lookup, "")
+  let _said = Io.writeLine(Messaging.summarize(&refused))
+  if found == Ok("account of ada@example.com") && Shared.current(&calls) == 2 && Messaging.violations(&(match refused { case Err(failure) => failure case Ok(_) => Messaging.Refused("") })).length() == 1 { 0 } else { 1 }
+}

@@ -1,0 +1,105 @@
+/** @Test.Publishing.Suite — sequential, continuing, parallel, and bounded publication */
+module PuduLangMediator.PublishingTest
+
+import Std.Concurrent as Concurrent
+import Std.Io as Io
+import Std.Math as Math
+import Std.Test as Test
+import PuduLangMediator.Context as Context
+import PuduLangMediator as Messaging
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Utils.Shared as Shared
+
+/** @Test.Publishing.Gauge — how many executors run now, and the most that ever did */
+type Gauge = { running: Shared.Shared[Int], peak: Shared.Shared[Int], ran: Shared.Shared[Array[Str]] }
+
+/// A fresh gauge.
+fn gauge() -> Gauge { Gauge{running: Shared.shared(0), peak: Shared.shared(0), ran: Shared.shared([])} }
+
+/// An executor that records itself, holds for `millis`, and answers `outcome`.
+fn executor(meter: &Gauge, name: Str, millis: Int, outcome: Messaging.Outcome[(), Str]) -> Publishing.Executor[Str] {
+  let held = *meter
+  Publishing.Executor{handler: name, run: fn(_context: Context.Context) -> Messaging.Outcome[(), Str] {
+      let now = Shared.change(&held.running, fn(count: Int) -> (Int, Int) { (count + 1, count + 1) })
+      Shared.update(&held.peak, |peak: Int| Math.max(peak, now))
+      let _held = Concurrent.sleep(millis)
+      Shared.update(&held.ran, |names: Array[Str]| names.push(name))
+      Shared.update(&held.running, |count: Int| count - 1)
+      outcome
+    } }
+}
+
+/// An executor that stops its thread.
+fn crashing(name: Str) -> Publishing.Executor[Str] {
+  Publishing.Executor{handler: name, run: fn(_context: Context.Context) -> Messaging.Outcome[(), Str] { panic("handler " + name + " crashed") }}
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let sequential = gauge()
+  let stopped = Publishing.Sequential{}.publish(&[
+      executor(&sequential, "a", 0, Ok(())),
+      executor(&sequential, "b", 0, Messaging.raise("b failed")),
+      executor(&sequential, "c", 0, Ok(()))
+    ], Context.create())
+  let cancelledContext = Context.create()
+  Context.cancel(&cancelledContext, "shutdown")
+  let cancelledGauge = gauge()
+  let cancelled = Publishing.Sequential{}.publish(&[executor(&cancelledGauge, "a", 0, Ok(()))], cancelledContext)
+  let continuing = gauge()
+  let continued = Publishing.Continuing{}.publish(&[
+      executor(&continuing, "a", 0, Messaging.raise("a failed")),
+      executor(&continuing, "b", 0, Ok(())),
+      executor(&continuing, "c", 0, Messaging.raise("c failed"))
+    ], Context.create())
+  let parallel = gauge()
+  let together = Publishing.Parallel{}.publish(&[
+      executor(&parallel, "a", 60, Ok(())),
+      executor(&parallel, "b", 60, Messaging.raise("b failed")),
+      executor(&parallel, "c", 60, Ok(())),
+      crashing("d")
+    ], Context.create())
+  let bounded = gauge()
+  let limited = Publishing.Bounded{workers: 2}.publish(&[
+      executor(&bounded, "a", 30, Ok(())),
+      executor(&bounded, "b", 30, Ok(())),
+      executor(&bounded, "c", 30, Messaging.raise("c failed")),
+      executor(&bounded, "d", 30, Ok(())),
+      crashing("e")
+    ], Context.create())
+  let atLeastOne = gauge()
+  let single = Publishing.Bounded{workers: 0}.publish(&[executor(&atLeastOne, "a", 0, Ok(())), executor(&atLeastOne, "b", 0, Ok(()))], Context.create())
+  let empty: Messaging.Outcome[(), Str] = Publishing.Parallel{}.publish(&[], Context.create())
+  let strategies: Array[dynamic Publishing.Strategy] = [Publishing.Sequential{}, Publishing.Continuing{}, Publishing.Parallel{}, Publishing.Bounded{workers: 4}]
+  var allSucceed = true
+  for strategy in strategies {
+    let meter = gauge()
+    if strategy.publish(&[executor(&meter, "a", 0, Ok(())), executor(&meter, "b", 0, Ok(()))], Context.create()) != Ok(()) { allSucceed = false }
+  }
+  let checks = Test.suite("Publishing", &[
+      Test.equals("sequential stops at the first failure", &stopped, &Err(Messaging.Raised("b failed"))),
+      Test.equals("handlers after a failure never run", &Shared.current(&sequential.ran), &["a", "b"]),
+      Test.equals("sequential does not start on a cancelled context", &(cancelled, Shared.current(&cancelledGauge.ran)), &(Err(Messaging.Cancelled("cancelled: shutdown")), [])),
+      Test.equals("continuing runs every handler and answers every failure", &(continued, Shared.current(&continuing.ran)), &(
+          Err(Messaging.Aggregate([Messaging.Raised("a failed"), Messaging.Raised("c failed")])), ["a", "b", "c"]
+        )),
+      Test.equals("parallel answers every failure in handler order, a crash included", &together, &Err(
+          Messaging.Aggregate([Messaging.Raised("b failed"), Messaging.Crashed("handler d crashed")])
+        )),
+      Test.that("parallel runs the handlers at once", Shared.current(&parallel.peak) >= 2),
+      Test.equals("parallel waits for every handler", &Shared.current(&parallel.ran).length(), &3),
+      Test.equals("bounded answers every failure, a crash included", &limited, &Err(
+          Messaging.Aggregate([Messaging.Raised("c failed"), Messaging.Crashed("handler e crashed")])
+        )),
+      Test.equals("bounded never runs more than its workers", &Shared.current(&bounded.peak), &2),
+      Test.equals("bounded runs every handler", &Shared.current(&bounded.ran).length(), &4),
+      Test.equals("bounded with no workers still runs one at a time", &(single, Shared.current(&atLeastOne.peak)), &(Ok(()), 1)),
+      Test.equals("nothing to run succeeds", &empty, &Ok(())),
+      Test.that("every strategy succeeds when every handler does", allSucceed)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

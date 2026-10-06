@@ -1,0 +1,44 @@
+/** @Test.Utils.Suite — templates, shared state, and thread reasons */
+module PuduLangMediator.Utils.UtilsTest
+
+import Std.Concurrent as Concurrent
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Utils.Shared as Shared
+import PuduLangMediator.Utils.Template as Template
+import PuduLangMediator.Utils.Threads as Threads
+
+/// Runs the suite.
+fn main() -> Int {
+  let counter = Shared.shared(0)
+  var workers: Array[Concurrent.Task] = []
+  var index = 0
+  while index < 8 {
+    if let Ok(worker) = Concurrent.start(fn() -> () {
+        var turn = 0
+        while turn < 100 {
+          Shared.update(&counter, |held: Int| held + 1)
+          turn = turn + 1
+        }
+      }) { workers = workers.push(worker) }
+    index = index + 1
+  }
+  let _joined = Concurrent.joinAll(&workers)
+  let swapped = Shared.change(&counter, fn(held: Int) -> (Int, Int) { (0, held) })
+  let crashed = Concurrent.contain(fn() -> () { panic("boom") })
+  let checks = Test.suite("Utils", &[
+      Test.equals("slots are filled in order", &Template.fill("<1> and <2>", &["a", "b"]), &"a and b"),
+      Test.equals("a slot without a value is kept", &Template.fill("<1> <3>", &["a"]), &"a <3>"),
+      Test.equals("a filled value is not filled again", &Template.fill("<1>", &["<1>"]), &"<1>"),
+      Test.equals("text that is not a slot stays", &Template.fill("a < b > c <x>", &["z"]), &"a < b > c <x>"),
+      Test.equals("no concurrent update is lost", &swapped, &800),
+      Test.equals("a change answers its second half and stores its first", &Shared.current(&counter), &0),
+      Test.equals("a stopped thread's message is its reason", &(match crashed { case Err(problem) => Threads.reasonOf(&problem) case Ok(_) => "" }), &"boom"),
+      Test.equals("an error without a message is shown", &Threads.reasonOf(&Concurrent.Missing), &"Missing")
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

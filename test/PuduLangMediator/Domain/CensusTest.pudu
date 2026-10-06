@@ -1,0 +1,35 @@
+/** @Test.Domain.Census.Suite — registration problems at their boundaries */
+module PuduLangMediator.Domain.CensusTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Domain.Census as Census
+
+/// A census of a well-registered request kind.
+fn sound() -> Census.Census { Census.Census{name: "orders.get", handlers: 1, components: 2, collisions: 0, single: true} }
+
+/// Runs the suite.
+fn main() -> Int {
+  let checks = Test.suite("Domain.Census", &[
+      Test.equals("one handler and components is sound", &Census.problems(&sound()), &[]),
+      Test.equals("a kind without a name is reported", &Census.problems(&Census.Census{..sound(), name: ""}), &["a kind is registered without a name"]),
+      Test.equals("one collision is reported", &Census.problems(&Census.Census{..sound(), collisions: 1}), &["'orders.get' names two different kinds"]),
+      Test.equals("two handlers are reported with their count", &Census.problems(&Census.Census{..sound(), handlers: 2}), &[
+          "'orders.get' has 2 handlers; a request or stream takes exactly one"
+        ]),
+      Test.equals("components without a handler are reported", &Census.problems(&Census.Census{..sound(), handlers: 0, components: 1}), &[
+          "'orders.get' has behaviors or processors but no handler"
+        ]),
+      Test.equals("no handler and no components is not reported", &Census.problems(&Census.Census{..sound(), handlers: 0, components: 0}), &[]),
+      Test.equals("a notification kind takes any number of handlers", &Census.problems(&Census.Census{..sound(), handlers: 3, single: false}), &[]),
+      Test.equals("a notification kind needs no handler", &Census.problems(&Census.Census{..sound(), handlers: 0, single: false}), &[]),
+      Test.equals("every problem is reported at once, in order", &Census.problems(&Census.Census{name: "", handlers: 2, components: 0, collisions: 2, single: true}), &[
+          "a kind is registered without a name", "'' names two different kinds", "'' has 2 handlers; a request or stream takes exactly one"
+        ])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

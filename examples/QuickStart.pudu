@@ -1,0 +1,47 @@
+/** @Examples.QuickStart.Program — one query, one command, and one notification */
+module QuickStart
+
+import Std.Io as Io
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+
+/** @Examples.QuickStart.Greeting — the query's request */
+type Greeting = { name: Str }
+
+/// Builds a mediator, sends a query and a command, publishes a notification, and prints the outcomes.
+fn main() -> Int {
+  let greet: Request.Kind[Greeting, Str, Str] = Request.kind("greet")
+  let wave: Request.Kind[Str, (), Str] = Request.command("wave")
+  let greeted: Notification.Kind[Str, Str] = Notification.kind("greeted")
+  let built = Mediator.build([
+      Registration.handler(&greet, fn(request: Greeting, _context: Context.Context) -> Messaging.Outcome[Str, Str] {
+          if request.name.isEmpty() { Messaging.raise("who should I greet?") } else { Ok("Hello, " + request.name + "!") }
+        }),
+      Registration.handler(&wave, fn(name: Str, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+          let _said = Io.writeLine("(waves at " + name + ")")
+          Ok(())
+        }),
+      Registration.notificationHandler(&greeted, "audit", fn(name: Str, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+          let _said = Io.writeLine("audit: greeted " + name)
+          Ok(())
+        })
+    ])
+  let mediator = match built {
+    case Ok(found) => found
+    case Err(invalid) => {
+      let _said = Io.writeErrorLine(Mediator.explain(&invalid))
+      return 1
+    }
+  }
+  let hello = Mediator.send(&mediator, &greet, Greeting{name: "Ada"})
+  let nobody = Mediator.send(&mediator, &greet, Greeting{name: ""})
+  let waved = Mediator.send(&mediator, &wave, "Ada")
+  let published = Mediator.publish(&mediator, &greeted, "Ada")
+  let _first = Io.writeLine(Messaging.summarize(&hello))
+  let _second = Io.writeLine(Messaging.summarize(&nobody))
+  if hello == Ok("Hello, Ada!") && nobody == Err(Messaging.Raised("who should I greet?")) && waved == Ok(()) && published == Ok(()) { 0 } else { 1 }
+}

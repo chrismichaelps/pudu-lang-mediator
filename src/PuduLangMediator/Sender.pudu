@@ -1,0 +1,34 @@
+/** @Mediator.Sender.Seam — what a component that only sends requests depends on */
+module PuduLangMediator.Sender
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+
+/** @Mediator.Sender.Sender — sends requests and streams; a mediator or a test double */
+export trait Sender {
+  /// The request's outcome through its pipeline.
+  fn send[Q, R, E](self: &Self, subject: &Request.Kind[Q, R, E], request: Q, context: Context.Context) -> Messaging.Outcome[R, E]
+  /// The answer to a request whose type the caller does not name.
+  fn dispatch(self: &Self, envelope: Message.Envelope, context: Context.Context) -> Message.Answer
+  /// Hands each item of a stream request to `sink` until it declines one.
+  fn stream[Q, T, E](self: &Self, subject: &Stream.Kind[Q, T, E], request: Q, context: Context.Context, sink: Stream.Sink[T]) -> Messaging.Outcome[(), E]
+}
+
+impl Sender for Mediator.Mediator {
+  /// `Mediator.sendWith`.
+  fn send[Q, R, E](self: &Self, subject: &Request.Kind[Q, R, E], request: Q, context: Context.Context) -> Messaging.Outcome[R, E] {
+    Mediator.sendWith(self, subject, request, context)
+  }
+
+  /// `Mediator.dispatchWith`.
+  fn dispatch(self: &Self, envelope: Message.Envelope, context: Context.Context) -> Message.Answer { Mediator.dispatchWith(self, envelope, context) }
+
+  /// `Mediator.streamWith`.
+  fn stream[Q, T, E](self: &Self, subject: &Stream.Kind[Q, T, E], request: Q, context: Context.Context, sink: Stream.Sink[T]) -> Messaging.Outcome[(), E] {
+    Mediator.streamWith(self, subject, request, context, sink)
+  }
+}

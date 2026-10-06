@@ -1,0 +1,140 @@
+/** @Mediator.Catalog.Registry — every registration gathered before a build */
+module PuduLangMediator.Catalog
+
+import Std.HashMap as HashMap
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Domain.Census as Census
+import PuduLangMediator.Domain.Order as Order
+import PuduLangMediator.Message as Message
+import PuduLangMediator.Open as Open
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/** @Mediator.Catalog.Scope — which failures exception actions observe */
+export type Scope = ForUnhandled | ForAll
+
+/** @Mediator.Catalog.Assembly — the open components and options every kind is built with */
+export type Assembly = {
+  marks: Array[Order.Mark],
+  behaviors: Array[dynamic Open.Behavior],
+  preProcessors: Array[dynamic Open.PreProcessor],
+  postProcessors: Array[dynamic Open.PostProcessor],
+  exceptionActions: Array[dynamic Open.ExceptionAction],
+  listeners: Array[Open.Listener],
+  streamBehaviors: Array[dynamic Open.StreamBehavior],
+  publisher: dynamic Publishing.Strategy,
+  actionScope: Scope
+}
+
+/** @Mediator.Catalog.Dispatch — how an envelope of one kind is answered */
+export type Dispatch
+  = Answering(fn(Message.Envelope, Context.Context) -> Message.Answer)
+  | Streaming(fn(Message.Envelope, Context.Context, fn(Erasure.Packed) -> Bool) -> Message.Answer)
+
+/** @Mediator.Catalog.Compiled — one kind's composed pipeline, typed and untyped */
+export type Compiled = { info: Message.Info, invoke: Erasure.Packed, dispatch: Dispatch }
+
+/** @Mediator.Catalog.Entry — one kind's registrations, counted, before composition */
+export type Entry = {
+  info: Message.Info,
+  route: Erasure.Packed,
+  handlers: Int,
+  components: Int,
+  collisions: Int,
+  finish: fn(Erasure.Packed, Assembly) -> Compiled
+}
+
+/** @Mediator.Catalog.Catalog — the registrations of one mediator, by shape and name */
+export type Catalog = {
+  requests: HashMap.HashMap[Str, Entry],
+  notifications: HashMap.HashMap[Str, Entry],
+  streams: HashMap.HashMap[Str, Entry],
+  assembly: Assembly
+}
+
+/// A catalog with no registrations, publishing with `publisher` and scoping actions by `actionScope`.
+export fn empty(publisher: dynamic Publishing.Strategy, actionScope: Scope) -> Catalog {
+  Catalog {
+    requests: HashMap.empty(),
+    notifications: HashMap.empty(),
+    streams: HashMap.empty(),
+    assembly: Assembly {
+      marks: [],
+      behaviors: [],
+      preProcessors: [],
+      postProcessors: [],
+      exceptionActions: [],
+      listeners: [],
+      streamBehaviors: [],
+      publisher: publisher,
+      actionScope: actionScope
+    }
+  }
+}
+
+/// The table with `change` applied to the route of the kind `info` names, counting the handlers
+/// and components it adds. A first registration starts from `blank`; a registration whose route
+/// does not read back through `routes` belongs to another kind of the same name and is counted
+/// as a collision instead.
+export fn touch[R](
+  table: &HashMap.HashMap[Str, Entry],
+  info: &Message.Info,
+  routes: &Erasure.Slot[R],
+  blank: R,
+  change: fn(R) -> R,
+  handlers: Int,
+  components: Int,
+  finish: fn(Erasure.Packed, Assembly) -> Compiled
+) -> HashMap.HashMap[Str, Entry] {
+  let name = info.name
+  match HashMap.get(table, &name) {
+    case None => {
+      HashMap.insert(table, name, Entry{info: *info, route: Erasure.pack(routes, change(blank)), handlers: handlers, components: components, collisions: 0, finish: finish})
+    }
+    case Some(entry) => {
+      match Erasure.unpack(routes, &entry.route) {
+        case Some(route) => {
+          HashMap.insert(table, name, Entry {
+              ..entry,
+              route: Erasure.pack(routes, change(route)),
+              handlers: entry.handlers + handlers,
+              components: entry.components + components
+            })
+        }
+        case None => HashMap.insert(table, name, Entry{..entry, collisions: entry.collisions + 1})
+      }
+    }
+  }
+}
+
+/// The catalog with one more registration of `layer` for the kind `name`, in order.
+export fn marked(catalog: Catalog, layer: Order.Layer, name: Str) -> Catalog {
+  Catalog{..catalog, assembly: Assembly{..catalog.assembly, marks: catalog.assembly.marks.push(Order.Closed(layer, name))}}
+}
+
+/// Every problem with the catalog's registrations, requests first, then notifications, then streams.
+export fn problems(catalog: &Catalog) -> Array[Str] {
+  var found: Array[Str] = []
+  for table in [catalog.requests, catalog.notifications, catalog.streams] {
+    for entry in HashMap.values(&table) {
+      let single = entry.info.shape != Message.Event
+      found = found.concat(Census.problems(&Census.Census {
+            name: entry.info.name,
+            handlers: entry.handlers,
+            components: entry.components,
+            collisions: entry.collisions,
+            single: single
+          }))
+    }
+  }
+  found
+}
+
+/// Every entry of a table composed with the catalog's assembly.
+export fn compile(table: &HashMap.HashMap[Str, Entry], assembly: &Assembly) -> HashMap.HashMap[Str, Compiled] {
+  var compiled: HashMap.HashMap[Str, Compiled] = HashMap.empty()
+  for entry in HashMap.values(table) {
+    compiled = HashMap.insert(&compiled, entry.info.name, (entry.finish)(entry.route, *assembly))
+  }
+  compiled
+}

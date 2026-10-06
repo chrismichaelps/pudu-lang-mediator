@@ -1,0 +1,71 @@
+/** @Test.Behaviors.Resilient.Suite — requests retried, timed out, and cancelled by a resilience pipeline */
+module PuduLangMediator.Behaviors.ResilientTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Behaviors.Resilient as Resilient
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Utils.Shared as Shared
+import PuduLangResilience.Pipeline as Pipeline
+import PuduLangResilience as Resilience
+import PuduLangResilience.Retry as Retry
+import PuduLangResilience.Strategy as Strategy
+import PuduLangResilience.Timeout as Timeout
+
+/// A pipeline of the given strategies, or the reason it was refused.
+fn guarded(strategies: Array[Strategy.Strategy[Int, Messaging.Failure[Str]]]) -> Pipeline.Pipeline[Int, Messaging.Failure[Str]] {
+  match Pipeline.build(strategies) {
+    case Ok(pipeline) => pipeline
+    case Err(invalid) => panic(Pipeline.explain(&invalid))
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let flaky: Request.Kind[Int, Int, Str] = Request.kind("flaky")
+  let slow: Request.Kind[Int, Int, Str] = Request.kind("slow")
+  let attempts = Shared.shared(0)
+  let retrying = guarded([Retry.strategy(Retry.Options{..Retry.defaults(), maxRetryAttempts: 3, delay: 0})])
+  let timing = guarded([Timeout.strategy(Timeout.after(50))])
+  let mediator = match Mediator.build([
+      Resilient.register(&flaky, retrying),
+      Registration.handler(&flaky, fn(failUntil: Int, _context: Context.Context) -> Messaging.Outcome[Int, Str] {
+          let made = Shared.change(&attempts, fn(count: Int) -> (Int, Int) { (count + 1, count + 1) })
+          if made < failUntil { Messaging.raise("attempt " + show(made)) } else { Ok(made) }
+        }),
+      Resilient.register(&slow, timing),
+      Registration.handler(&slow, fn(millis: Int, context: Context.Context) -> Messaging.Outcome[Int, Str] {
+          Context.pause(&context, millis) ?
+          Ok(millis)
+        })
+    ]) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let recovered = Mediator.send(&mediator, &flaky, 3)
+  Shared.update(&attempts, |_count: Int| 0)
+  let exhausted = Mediator.send(&mediator, &flaky, 10)
+  let quick = Mediator.send(&mediator, &slow, 1)
+  let late = Mediator.send(&mediator, &slow, 5000)
+  let leaving = Context.create()
+  Context.cancel(&leaving, "caller left")
+  let cancelled = Mediator.sendWith(&mediator, &slow, 5000, leaving)
+  let checks = Test.suite("Behaviors.Resilient", &[
+      Test.equals("a failing handler is retried until it succeeds", &recovered, &Ok(3)),
+      Test.equals("the handler's own failure survives exhausted retries", &(exhausted, Shared.current(&attempts)), &(Err(Messaging.Raised("attempt 4")), 4)),
+      Test.equals("a quick handler is not timed out", &quick, &Ok(1)),
+      Test.equals("a slow handler is refused with the timeout's description", &late, &Err(Messaging.Refused("The operation did not complete within 50 ms."))),
+      Test.equals("a caller's cancellation stays a cancellation", &cancelled, &Err(Messaging.Cancelled("cancelled: caller left"))),
+      Test.equals("a rejection becomes a refusal", &Resilient.translated(&Resilience.IsolatedCircuit), &Messaging.Refused("The circuit is isolated and admits no execution.")),
+      Test.equals("a crash stays a crash", &Resilient.translated(&Resilience.Crashed("boom")), &Messaging.Crashed("boom"))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

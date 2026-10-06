@@ -1,0 +1,126 @@
+/** @Test.Registration.Suite — what each registration adds to a catalog */
+module PuduLangMediator.RegistrationTest
+
+import Std.HashMap as HashMap
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Catalog as Catalog
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Domain.Order as Order
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Open as Open
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+
+/** @Test.Registration.Quiet — an open component of every layer that does nothing */
+type Quiet = {}
+
+impl Open.Behavior for Quiet {
+  /// Runs the rest of the pipeline.
+  fn handleRequest[Q, R, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] { next(context) }
+}
+
+impl Open.PreProcessor for Quiet {
+  /// Lets the request continue.
+  fn beforeRequest[Q, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] { Ok(()) }
+}
+
+impl Open.PostProcessor for Quiet {
+  /// Lets the response through.
+  fn afterRequest[Q, R, E](self: &Self, request: &Q, response: &R, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] { Ok(()) }
+}
+
+impl Open.ExceptionAction for Quiet {
+  /// Observes nothing.
+  fn onFailure[Q, E](self: &Self, request: &Q, failure: &Messaging.Failure[E], info: &Message.Info, context: Context.Context) -> () { () }
+}
+
+impl Open.NotificationHandler for Quiet {
+  /// Hears nothing.
+  fn handleNotification[N, E](self: &Self, notification: &N, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] { Ok(()) }
+}
+
+impl Open.StreamBehavior for Quiet {
+  /// Runs the rest of the stream.
+  fn handleStream[Q, T, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, sink: Stream.Sink[T], next: Stream.Next[T, E]) -> Messaging.Outcome[(), E] {
+    next(context, sink)
+  }
+}
+
+/// The catalog after applying registrations in order.
+fn applied(registrations: Array[Registration.Registration]) -> Catalog.Catalog {
+  var catalog = Catalog.empty(Publishing.Sequential{}, Catalog.ForUnhandled)
+  for registration in registrations { catalog = (registration.apply)(catalog) }
+  catalog
+}
+
+/// The handler and component counts of one entry.
+fn counted(table: &HashMap.HashMap[Str, Catalog.Entry], name: Str) -> (Int, Int) {
+  match HashMap.get(table, &name) {
+    case Some(entry) => (entry.handlers, entry.components)
+    case None => (0, 0)
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let ask: Request.Kind[Int, Int, Str] = Request.kind("ask")
+  let told: Notification.Kind[Int, Str] = Notification.kind("told")
+  let flow: Stream.Kind[Int, Int, Str] = Stream.kind("flow")
+  let passThrough = fn(_request: Int, context: Context.Context, next: Request.Next[Int, Str]) -> Messaging.Outcome[Int, Str] { next(context) }
+  let catalog = applied([
+      Registration.openBehavior(Quiet{}),
+      Registration.group([
+          Registration.handler(&ask, |value: Int, _context: Context.Context| Ok(value)),
+          Registration.behavior(&ask, passThrough),
+          Registration.preProcessor(&ask, |_value: Int, _context: Context.Context| Ok(())),
+          Registration.postProcessor(&ask, |_value: Int, _answer: Int, _context: Context.Context| Ok(()))
+        ]),
+      Registration.exceptionHandler(&ask, |_value: Int, _failure: Messaging.Failure[Str], _context: Context.Context| None),
+      Registration.exceptionAction(&ask, |_value: Int, _failure: Messaging.Failure[Str], _context: Context.Context| ()),
+      Registration.openPreProcessor(Quiet{}),
+      Registration.openPostProcessor(Quiet{}),
+      Registration.openExceptionAction(Quiet{}),
+      Registration.notificationHandler(&told, "one", |_value: Int, _context: Context.Context| Ok(())),
+      Registration.openNotificationHandler("quiet", Quiet{}),
+      Registration.notificationHandler(&told, "two", |_value: Int, _context: Context.Context| Ok(())),
+      Registration.streamHandler(&flow, fn(_value: Int, _context: Context.Context, _sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] { Ok(()) }),
+      Registration.streamBehavior(&flow, fn(_value: Int, context: Context.Context, sink: Stream.Sink[Int], next: Stream.Next[Int, Str]) -> Messaging.Outcome[(), Str] { next(context, sink) }),
+      Registration.openStreamBehavior(Quiet{})
+    ])
+  let held = catalog.assembly
+  let checks = Test.suite("Registration", &[
+      Test.equals("a request kind counts one handler and five components", &counted(&catalog.requests, "ask"), &(1, 5)),
+      Test.equals("a notification kind counts every handler", &counted(&catalog.notifications, "told"), &(2, 0)),
+      Test.equals("a stream kind counts its handler and behavior", &counted(&catalog.streams, "flow"), &(1, 1)),
+      Test.equals("every open component is kept once", &(held.behaviors.length(), held.preProcessors.length(), held.postProcessors.length(), held.exceptionActions.length(), held.listeners.length(), held.streamBehaviors.length()), &(
+          1, 1, 1, 1, 1, 1
+        )),
+      Test.equals("an open notification handler keeps its name", &held.listeners.map(|listener: Open.Listener| listener.name), &["quiet"]),
+      Test.equals("every ordered registration is marked in order, groups included", &held.marks, &[
+          Order.Open(Order.Behaviors, 0),
+          Order.Closed(Order.Behaviors, "ask"),
+          Order.Closed(Order.PreProcessors, "ask"),
+          Order.Closed(Order.PostProcessors, "ask"),
+          Order.Closed(Order.ExceptionActions, "ask"),
+          Order.Open(Order.PreProcessors, 0),
+          Order.Open(Order.PostProcessors, 0),
+          Order.Open(Order.ExceptionActions, 0),
+          Order.Closed(Order.NotificationHandlers, "told"),
+          Order.Open(Order.NotificationHandlers, 0),
+          Order.Closed(Order.NotificationHandlers, "told"),
+          Order.Closed(Order.StreamBehaviors, "flow"),
+          Order.Open(Order.StreamBehaviors, 0)
+        ]),
+      Test.equals("nothing is a problem", &Catalog.problems(&catalog), &[])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

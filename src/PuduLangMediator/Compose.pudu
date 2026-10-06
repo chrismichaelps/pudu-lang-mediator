@@ -1,0 +1,247 @@
+/** @Mediator.Compose.Builder — one kind's pipeline from its route and the open components */
+module PuduLangMediator.Compose
+
+import Std.List as List
+import Std.Option as Option
+import PuduLangMediator.Catalog as Catalog
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Domain.Order as Order
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Open as Open
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/// A request kind's handler wrapped, outermost first, in its exception layers (actions outside
+/// handlers for `ForUnhandled`, inside them for `ForAll`), its pre-processors, its
+/// post-processors, and its behaviors in registration order. A layer with no components is left out.
+export fn requestHandler[Q, R, E](info: &Message.Info, route: &Request.Route[Q, R, E], assembly: &Catalog.Assembly) -> Request.Handler[Q, R, E] {
+  let seen = *info
+  let marks = assembly.marks
+  var actions: Array[Request.ExceptionAction[Q, E]] = []
+  for pick in Order.picks(&marks, Order.ExceptionActions, seen.name) {
+    actions = actions.push(match pick {
+        case Order.Shared(index) => openAction(assembly.exceptionActions[index], seen)
+        case Order.Own(index) => route.exceptionActions[index]
+      })
+  }
+  var pres: Array[Request.PreProcessor[Q, E]] = []
+  for pick in Order.picks(&marks, Order.PreProcessors, seen.name) {
+    pres = pres.push(match pick {
+        case Order.Shared(index) => openPre(assembly.preProcessors[index], seen)
+        case Order.Own(index) => route.preProcessors[index]
+      })
+  }
+  var posts: Array[Request.PostProcessor[Q, R, E]] = []
+  for pick in Order.picks(&marks, Order.PostProcessors, seen.name) {
+    posts = posts.push(match pick {
+        case Order.Shared(index) => openPost(assembly.postProcessors[index], seen)
+        case Order.Own(index) => route.postProcessors[index]
+      })
+  }
+  var observing: Array[Request.Behavior[Q, R, E]] = []
+  if !actions.isEmpty() { observing = observing.push(observed(actions)) }
+  var recovering: Array[Request.Behavior[Q, R, E]] = []
+  if !route.exceptionHandlers.isEmpty() { recovering = recovering.push(recovered(route.exceptionHandlers)) }
+  var layers = match assembly.actionScope {
+    case Catalog.ForUnhandled => observing.concat(recovering)
+    case Catalog.ForAll => recovering.concat(observing)
+  }
+  if !pres.isEmpty() { layers = layers.push(preprocessed(pres)) }
+  if !posts.isEmpty() { layers = layers.push(postprocessed(posts)) }
+  for pick in Order.picks(&marks, Order.Behaviors, seen.name) {
+    layers = layers.push(match pick {
+        case Order.Shared(index) => openBehavior(assembly.behaviors[index], seen)
+        case Order.Own(index) => route.behaviors[index]
+      })
+  }
+  wrap(layers, Option.unwrapOr(List.first(&route.handlers), unhandled(seen.name)))
+}
+
+/// A notification kind's publication: its own handlers and the open ones in registration order,
+/// run by the assembly's publishing strategy.
+export fn publication[N, E](info: &Message.Info, route: &Notification.Route[N, E], assembly: &Catalog.Assembly) -> Notification.Handler[N, E] {
+  let seen = *info
+  var handlers: Array[Notification.Named[N, E]] = []
+  for pick in Order.picks(&assembly.marks, Order.NotificationHandlers, seen.name) {
+    handlers = handlers.push(match pick {
+        case Order.Shared(index) => listened(assembly.listeners[index], seen)
+        case Order.Own(index) => route.handlers[index]
+      })
+  }
+  let publisher = assembly.publisher
+  fn(notification: N, context: Context.Context) -> Messaging.Outcome[(), E] {
+    let executors = handlers.map(fn(named: Notification.Named[N, E]) -> Publishing.Executor[E] {
+        Publishing.Executor{handler: named.name, run: fn(passed: Context.Context) -> Messaging.Outcome[(), E] { (named.handle)(notification, passed) }}
+      })
+    publisher.publish(&executors, context)
+  }
+}
+
+/// A stream kind's handler wrapped in its behaviors, open and its own, in registration order.
+export fn streamHandler[Q, T, E](info: &Message.Info, route: &Stream.Route[Q, T, E], assembly: &Catalog.Assembly) -> Stream.Handler[Q, T, E] {
+  let seen = *info
+  var layers: Array[Stream.Behavior[Q, T, E]] = []
+  for pick in Order.picks(&assembly.marks, Order.StreamBehaviors, seen.name) {
+    layers = layers.push(match pick {
+        case Order.Shared(index) => openStream(assembly.streamBehaviors[index], seen)
+        case Order.Own(index) => route.behaviors[index]
+      })
+  }
+  var composed = Option.unwrapOr(List.first(&route.handlers), unhandledStream(seen.name))
+  var index = layers.length() - 1
+  while index >= 0 {
+    let layer = layers[index]
+    let inner = composed
+    composed = fn(request: Q, context: Context.Context, sink: Stream.Sink[T]) -> Messaging.Outcome[(), E] {
+      layer(request, context, sink, fn(passed: Context.Context, passing: Stream.Sink[T]) -> Messaging.Outcome[(), E] { inner(request, passed, passing) })
+    }
+    index = index - 1
+  }
+  composed
+}
+
+/// How a request kind's entry is composed once the catalog is complete.
+export fn requestFinish[Q, R, E](subject: Request.Kind[Q, R, E]) -> fn(Erasure.Packed, Catalog.Assembly) -> Catalog.Compiled {
+  fn(packed: Erasure.Packed, assembly: Catalog.Assembly) -> Catalog.Compiled {
+    let info = subject.info
+    let invoke = requestHandler(&info, &Option.unwrapOr(Erasure.unpack(&subject.routes, &packed), Request.route()), &assembly)
+    Catalog.Compiled{info: info, invoke: Erasure.pack(&subject.invokers, invoke), dispatch: Catalog.Answering(fn(envelope: Message.Envelope, context: Context.Context) -> Message.Answer {
+          match Erasure.unpack(&subject.requests, &envelope.packed) {
+            case Some(found) => Message.answered(&info, &subject.outcomes, invoke(found, context))
+            case None => Message.undelivered(&info, Message.WrongKind(info.name))
+          }
+        }) }
+  }
+}
+
+/// How a notification kind's entry is composed once the catalog is complete.
+export fn notificationFinish[N, E](subject: Notification.Kind[N, E]) -> fn(Erasure.Packed, Catalog.Assembly) -> Catalog.Compiled {
+  fn(packed: Erasure.Packed, assembly: Catalog.Assembly) -> Catalog.Compiled {
+    let info = subject.info
+    let invoke = publication(&info, &Option.unwrapOr(Erasure.unpack(&subject.routes, &packed), Notification.route()), &assembly)
+    Catalog.Compiled{info: info, invoke: Erasure.pack(&subject.invokers, invoke), dispatch: Catalog.Answering(fn(envelope: Message.Envelope, context: Context.Context) -> Message.Answer {
+          match Erasure.unpack(&subject.notifications, &envelope.packed) {
+            case Some(found) => Message.answered(&info, &subject.outcomes, invoke(found, context))
+            case None => Message.undelivered(&info, Message.WrongKind(info.name))
+          }
+        }) }
+  }
+}
+
+/// How a stream kind's entry is composed once the catalog is complete.
+export fn streamFinish[Q, T, E](subject: Stream.Kind[Q, T, E]) -> fn(Erasure.Packed, Catalog.Assembly) -> Catalog.Compiled {
+  fn(packed: Erasure.Packed, assembly: Catalog.Assembly) -> Catalog.Compiled {
+    let info = subject.info
+    let items = subject.items
+    let invoke = streamHandler(&info, &Option.unwrapOr(Erasure.unpack(&subject.routes, &packed), Stream.route()), &assembly)
+    Catalog.Compiled{info: info, invoke: Erasure.pack(&subject.invokers, invoke), dispatch: Catalog.Streaming(fn(envelope: Message.Envelope, context: Context.Context, sink: fn(Erasure.Packed) -> Bool) -> Message.Answer {
+          match Erasure.unpack(&subject.requests, &envelope.packed) {
+            case Some(found) => Message.answered(&info, &subject.outcomes, invoke(found, context, fn(item: T) -> Bool { sink(Erasure.pack(&items, item)) }))
+            case None => Message.undelivered(&info, Message.WrongKind(info.name))
+          }
+        }) }
+  }
+}
+
+/// The handler wrapped in `layers`, the first outermost.
+fn wrap[Q, R, E](layers: Array[Request.Behavior[Q, R, E]], handler: Request.Handler[Q, R, E]) -> Request.Handler[Q, R, E] {
+  var composed = handler
+  var index = layers.length() - 1
+  while index >= 0 {
+    let layer = layers[index]
+    let inner = composed
+    composed = fn(request: Q, context: Context.Context) -> Messaging.Outcome[R, E] {
+      layer(request, context, fn(passed: Context.Context) -> Messaging.Outcome[R, E] { inner(request, passed) })
+    }
+    index = index - 1
+  }
+  composed
+}
+
+/// Runs every pre-processor in order, then the rest of the pipeline; a failure stops the request.
+fn preprocessed[Q, R, E](processors: Array[Request.PreProcessor[Q, E]]) -> Request.Behavior[Q, R, E] {
+  fn(request: Q, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    for processor in processors { processor(request, context) ? }
+    next(context)
+  }
+}
+
+/// Runs the rest of the pipeline, then every post-processor in order on a value it answered.
+fn postprocessed[Q, R, E](processors: Array[Request.PostProcessor[Q, R, E]]) -> Request.Behavior[Q, R, E] {
+  fn(request: Q, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    let response = next(context) ?
+    for processor in processors { processor(request, response, context) ? }
+    Ok(response)
+  }
+}
+
+/// Answers the first value an exception handler gives in place of a failure, in order.
+fn recovered[Q, R, E](handlers: Array[Request.ExceptionHandler[Q, R, E]]) -> Request.Behavior[Q, R, E] {
+  fn(request: Q, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    let outcome = next(context)
+    if let Err(failure) = outcome {
+      for handler in handlers {
+        if let Some(value) = handler(request, failure, context) { return Ok(value) }
+      }
+    }
+    outcome
+  }
+}
+
+/// Hands a failure to every exception action in order and answers it unchanged.
+fn observed[Q, R, E](actions: Array[Request.ExceptionAction[Q, E]]) -> Request.Behavior[Q, R, E] {
+  fn(request: Q, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    let outcome = next(context)
+    if let Err(failure) = outcome {
+      for action in actions { action(request, failure, context) }
+    }
+    outcome
+  }
+}
+
+/// An open behavior applied to one kind.
+fn openBehavior[Q, R, E](open: dynamic Open.Behavior, info: Message.Info) -> Request.Behavior[Q, R, E] {
+  fn(request: Q, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] { open.handleRequest(&request, &info, context, next) }
+}
+
+/// An open pre-processor applied to one kind.
+fn openPre[Q, E](open: dynamic Open.PreProcessor, info: Message.Info) -> Request.PreProcessor[Q, E] {
+  fn(request: Q, context: Context.Context) -> Messaging.Outcome[(), E] { open.beforeRequest(&request, &info, context) }
+}
+
+/// An open post-processor applied to one kind.
+fn openPost[Q, R, E](open: dynamic Open.PostProcessor, info: Message.Info) -> Request.PostProcessor[Q, R, E] {
+  fn(request: Q, response: R, context: Context.Context) -> Messaging.Outcome[(), E] { open.afterRequest(&request, &response, &info, context) }
+}
+
+/// An open exception action applied to one kind.
+fn openAction[Q, E](open: dynamic Open.ExceptionAction, info: Message.Info) -> Request.ExceptionAction[Q, E] {
+  fn(request: Q, failure: Messaging.Failure[E], context: Context.Context) -> () { open.onFailure(&request, &failure, &info, context) }
+}
+
+/// An open notification handler applied to one kind.
+fn listened[N, E](listener: Open.Listener, info: Message.Info) -> Notification.Named[N, E] {
+  let open = listener.handler
+  Notification.Named{name: listener.name, handle: fn(notification: N, context: Context.Context) -> Messaging.Outcome[(), E] { open.handleNotification(&notification, &info, context) }}
+}
+
+/// An open stream behavior applied to one kind.
+fn openStream[Q, T, E](open: dynamic Open.StreamBehavior, info: Message.Info) -> Stream.Behavior[Q, T, E] {
+  fn(request: Q, context: Context.Context, sink: Stream.Sink[T], next: Stream.Next[T, E]) -> Messaging.Outcome[(), E] {
+    open.handleStream(&request, &info, context, sink, next)
+  }
+}
+
+/// A handler answering `Unhandled`, for a kind whose route has none.
+fn unhandled[Q, R, E](name: Str) -> Request.Handler[Q, R, E] {
+  fn(_request: Q, _context: Context.Context) -> Messaging.Outcome[R, E] { Err(Messaging.Unhandled(name)) }
+}
+
+/// A stream handler answering `Unhandled`, for a kind whose route has none.
+fn unhandledStream[Q, T, E](name: Str) -> Stream.Handler[Q, T, E] {
+  fn(_request: Q, _context: Context.Context, _sink: Stream.Sink[T]) -> Messaging.Outcome[(), E] { Err(Messaging.Unhandled(name)) }
+}

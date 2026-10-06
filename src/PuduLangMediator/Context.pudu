@@ -1,0 +1,90 @@
+/** @Mediator.Context.Carrier — per-message cancellation token and typed items */
+module PuduLangMediator.Context
+
+import Std.Concurrent.Cancel as Cancel
+import Std.HashMap as HashMap
+import PuduLangMediator as Messaging
+import PuduLangMediator.Utils.Erasure as Erasure
+import PuduLangMediator.Utils.Shared as Shared
+
+/** @Mediator.Context.Context — what one message carries through its pipeline */
+export type Context = { token: Cancel.Token, items: Shared.Shared[HashMap.HashMap[Str, Erasure.Packed]] }
+
+/** @Mediator.Context.Key — a typed name for one item */
+export type Key[T] = { name: Str, slot: Erasure.Slot[T] }
+
+/// A context with a token that fires only when cancelled, and no items.
+export fn create() -> Context { Context{token: Cancel.token(), items: Shared.shared(HashMap.empty())} }
+
+/// A fresh context whose message stops when `token` fires.
+export fn cancellable(token: Cancel.Token) -> Context { Context{..create(), token: token} }
+
+/// The same context observing another token; items stay shared with the original.
+export fn withToken(source: &Context, token: Cancel.Token) -> Context { Context{..*source, token: token} }
+
+/// The same context with a token that fires when the original's does, after `millis`, or when
+/// cancelled itself; items stay shared.
+export fn expiring(source: &Context, millis: Int) -> Context { withToken(source, Cancel.childExpiring(&source.token, millis)) }
+
+/// A key whose items read back as `T`. Two keys made by separate calls never read each other's
+/// items, even under one name; make each key once and share it.
+export fn key[T](name: Str) -> Key[T] { Key{name: name, slot: Erasure.slot()} }
+
+/// Stores an item, replacing any item under the same name.
+export fn set[T](target: &Context, name: &Key[T], value: T) -> () {
+  let packed = Erasure.pack(&name.slot, value)
+  let field = name.name
+  Shared.update(&target.items, fn(held: HashMap.HashMap[Str, Erasure.Packed]) -> HashMap.HashMap[Str, Erasure.Packed] {
+      HashMap.insert(&held, field, packed)
+    })
+}
+
+/// The item under a key, when it is present and was stored through the same key.
+export fn get[T](source: &Context, name: &Key[T]) -> Option[T] {
+  let packed = HashMap.get(&Shared.current(&source.items), &name.name) ?
+  Erasure.unpack(&name.slot, &packed)
+}
+
+/// The item under a key, or `fallback` when it is absent.
+export fn getOr[T](source: &Context, name: &Key[T], fallback: T) -> T {
+  match get(source, name) {
+    case Some(found) => found
+    case None => fallback
+  }
+}
+
+/// Whether an item is stored under the key's name.
+export fn has[T](source: &Context, name: &Key[T]) -> Bool { HashMap.containsKey(&Shared.current(&source.items), &name.name) }
+
+/// Removes the item under a key.
+export fn remove[T](target: &Context, name: &Key[T]) -> () {
+  let field = name.name
+  Shared.update(&target.items, fn(held: HashMap.HashMap[Str, Erasure.Packed]) -> HashMap.HashMap[Str, Erasure.Packed] {
+      HashMap.remove(&held, &field)
+    })
+}
+
+/// The names of every stored item, in the order they were first stored.
+export fn names(source: &Context) -> Array[Str] { HashMap.keys(&Shared.current(&source.items)) }
+
+/// Asks the message holding this context to stop. The first reason given is kept.
+export fn cancel(target: &Context, why: Str) -> () { let _cancelled = Cancel.cancel(&target.token, why) }
+
+/// Whether the context's token has fired.
+export fn stopped(source: &Context) -> Bool { Cancel.stopped(&source.token) }
+
+/// `Ok` while the token has not fired, and `Cancelled` once it has, so a handler stops with `?`.
+export fn check[E](source: &Context) -> Result[(), Messaging.Failure[E]] {
+  match Cancel.check(&source.token) {
+    case Ok(_) => Ok(())
+    case Err(why) => Err(Messaging.Cancelled(Cancel.explain(&why)))
+  }
+}
+
+/// Sleeps `millis`, or answers `Cancelled` as soon as the token fires.
+export fn pause[E](source: &Context, millis: Int) -> Result[(), Messaging.Failure[E]] {
+  match Cancel.pause(&source.token, millis) {
+    case Ok(_) => Ok(())
+    case Err(why) => Err(Messaging.Cancelled(Cancel.explain(&why)))
+  }
+}

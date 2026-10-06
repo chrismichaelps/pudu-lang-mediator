@@ -1,0 +1,244 @@
+/** @Test.Compose.Suite — the documented order of every pipeline layer */
+module PuduLangMediator.ComposeTest
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Io as Io
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangMediator.Catalog as Catalog
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Open as Open
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+
+/** @Test.Compose.Tracer — an open component of every layer that records what it saw */
+type Tracer = { trace: Sync.Cell[Array[Str]], label: Str }
+
+impl Open.Behavior for Tracer {
+  /// Records entering and leaving.
+  fn handleRequest[Q, R, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    record(&self.trace, self.label + ">")
+    let outcome = next(context)
+    record(&self.trace, "<" + self.label)
+    outcome
+  }
+}
+
+impl Open.PreProcessor for Tracer {
+  /// Records the request.
+  fn beforeRequest[Q, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] {
+    record(&self.trace, "pre " + self.label)
+    Ok(())
+  }
+}
+
+impl Open.PostProcessor for Tracer {
+  /// Records the response.
+  fn afterRequest[Q, R, E](self: &Self, request: &Q, response: &R, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] {
+    record(&self.trace, "post " + self.label + " " + show(*response))
+    Ok(())
+  }
+}
+
+impl Open.ExceptionAction for Tracer {
+  /// Records the failure.
+  fn onFailure[Q, E](self: &Self, request: &Q, failure: &Messaging.Failure[E], info: &Message.Info, context: Context.Context) -> () {
+    record(&self.trace, "action " + self.label + " " + show(*failure))
+  }
+}
+
+impl Open.NotificationHandler for Tracer {
+  /// Records the notification.
+  fn handleNotification[N, E](self: &Self, notification: &N, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] {
+    record(&self.trace, "hear " + self.label + " " + show(*notification))
+    Ok(())
+  }
+}
+
+impl Open.StreamBehavior for Tracer {
+  /// Records entering and leaving, and tags every item.
+  fn handleStream[Q, T, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, sink: Stream.Sink[T], next: Stream.Next[T, E]) -> Messaging.Outcome[(), E] {
+    record(&self.trace, self.label + ">")
+    let trace = self.trace
+    let label = self.label
+    let outcome = next(context, fn(item: T) -> Bool {
+        record(&trace, label + " " + show(item))
+        sink(item)
+      })
+    record(&self.trace, "<" + self.label)
+    outcome
+  }
+}
+
+/// Appends a line to a trace.
+fn record(trace: &Sync.Cell[Array[Str]], line: Str) -> () {
+  let held = match Sync.get(trace) {
+    case Ok(found) => found
+    case Err(_) => []
+  }
+  let _stored = Sync.set(trace, held.push(line))
+}
+
+/// The trace so far, emptied.
+fn taken(trace: &Sync.Cell[Array[Str]]) -> Array[Str] {
+  match Sync.swap(trace, []) {
+    case Ok(found) => found
+    case Err(_) => []
+  }
+}
+
+/// A mediator built from registrations, or the reason it was refused.
+fn built(options: Mediator.Options, registrations: Array[Registration.Registration]) -> Mediator.Mediator {
+  match Mediator.buildWith(&options, registrations) {
+    case Ok(mediator) => mediator
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let trace: Sync.Cell[Array[Str]] = Sync.cell([])
+  let double: Request.Kind[Int, Int, Str] = Request.kind("double")
+  let open = fn(label: Str) -> Tracer { Tracer{trace: trace, label: label} }
+  let closed = fn(label: Str) -> Request.Behavior[Int, Int, Str] {
+    fn(request: Int, context: Context.Context, next: Request.Next[Int, Str]) -> Messaging.Outcome[Int, Str] {
+      record(&trace, label + ">")
+      let outcome = next(context)
+      record(&trace, "<" + label)
+      outcome
+    }
+  }
+  let layered = [
+    Registration.openBehavior(open("o1")),
+    Registration.behavior(&double, closed("c1")),
+    Registration.openPreProcessor(open("o")),
+    Registration.preProcessor(&double, fn(request: Int, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+        record(&trace, "pre c " + show(request))
+        if request < 0 { Messaging.raise("negative") } else { Ok(()) }
+      }),
+    Registration.postProcessor(&double, fn(_request: Int, response: Int, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+        record(&trace, "post c " + show(response))
+        if response > 100 { Messaging.raise("too large") } else { Ok(()) }
+      }),
+    Registration.openPostProcessor(open("o")),
+    Registration.openBehavior(open("o2")),
+    Registration.behavior(&double, closed("c2")),
+    Registration.openExceptionAction(open("o")),
+    Registration.exceptionAction(&double, fn(_request: Int, failure: Messaging.Failure[Str], _context: Context.Context) -> () { record(&trace, "action c " + show(failure)) }),
+    Registration.exceptionHandler(&double, fn(request: Int, _failure: Messaging.Failure[Str], _context: Context.Context) -> Option[Int] {
+        record(&trace, "recover first")
+        if request == 7 { Some(0) } else { None }
+      }),
+    Registration.exceptionHandler(&double, fn(request: Int, _failure: Messaging.Failure[Str], _context: Context.Context) -> Option[Int] {
+        record(&trace, "recover second")
+        if request == 9 { Some(99) } else { None }
+      }),
+    Registration.handler(&double, fn(request: Int, _context: Context.Context) -> Messaging.Outcome[Int, Str] {
+        record(&trace, "handle " + show(request))
+        if request == 7 || request == 9 || request == 13 { Messaging.raise("unlucky") } else { Ok(request * 2) }
+      })
+  ]
+  let unhandledOnly = built(Mediator.defaults(), layered)
+  let everyFailure = built(Mediator.Options{..Mediator.defaults(), actionScope: Catalog.ForAll}, layered)
+
+  let fine = Mediator.send(&unhandledOnly, &double, 4)
+  let fineTrace = taken(&trace)
+  let refusedEarly = Mediator.send(&unhandledOnly, &double, -1)
+  let earlyTrace = taken(&trace)
+  let tooLarge = Mediator.send(&unhandledOnly, &double, 60)
+  let largeTrace = taken(&trace)
+  let recoveredFirst = Mediator.send(&unhandledOnly, &double, 7)
+  let firstTrace = taken(&trace)
+  let recoveredSecond = Mediator.send(&unhandledOnly, &double, 9)
+  let secondTrace = taken(&trace)
+  let unrecovered = Mediator.send(&unhandledOnly, &double, 13)
+  let unrecoveredTrace = taken(&trace)
+  let recoveredSeen = Mediator.send(&everyFailure, &double, 7)
+  let seenTrace = taken(&trace)
+
+  let gate: Request.Kind[Int, Int, Str] = Request.kind("gate")
+  let token: Context.Key[Str] = Context.key("token")
+  let gated = built(Mediator.defaults(), [
+      Registration.behavior(&gate, fn(request: Int, context: Context.Context, next: Request.Next[Int, Str]) -> Messaging.Outcome[Int, Str] {
+          if request == 0 { Messaging.refuse("closed") } else { next(Context.withToken(&context, Cancel.expiring(0))) }
+        }),
+      Registration.handler(&gate, fn(request: Int, context: Context.Context) -> Messaging.Outcome[Int, Str] {
+          Context.check(&context) ?
+          Ok(request + Context.getOr(&context, &token, "").length())
+        })
+    ])
+  let shortCircuited = Mediator.send(&gated, &gate, 0)
+  let passedContext = Mediator.send(&gated, &gate, 1)
+
+  let placed: Notification.Kind[Int, Str] = Notification.kind("placed")
+  let published = built(Mediator.defaults(), [
+      Registration.notificationHandler(&placed, "first", fn(notification: Int, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+          record(&trace, "first " + show(notification))
+          Ok(())
+        }),
+      Registration.openNotificationHandler("open", open("o")),
+      Registration.notificationHandler(&placed, "second", fn(notification: Int, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+          record(&trace, "second " + show(notification))
+          Ok(())
+        })
+    ])
+  let publication = Mediator.publish(&published, &placed, 3)
+  let publicationTrace = taken(&trace)
+  let unregistered: Notification.Kind[Str, Str] = Notification.kind("unregistered")
+  let openOnly = Mediator.publish(&published, &unregistered, "x")
+  let openOnlyTrace = taken(&trace)
+
+  let letters: Stream.Kind[Int, Str, Str] = Stream.kind("letters")
+  let streamed = built(Mediator.defaults(), [
+      Registration.openStreamBehavior(open("o")),
+      Registration.streamBehavior(&letters, fn(_request: Int, context: Context.Context, sink: Stream.Sink[Str], next: Stream.Next[Str, Str]) -> Messaging.Outcome[(), Str] {
+          next(context, fn(item: Str) -> Bool { if item == "b" { true } else { sink(item + "!") } })
+        }),
+      Registration.streamHandler(&letters, fn(request: Int, _context: Context.Context, sink: Stream.Sink[Str]) -> Messaging.Outcome[(), Str] {
+          Stream.each(&["a", "b", "c", "d"].slice(0, request), sink)
+        })
+    ])
+  let letterItems = Mediator.collect(&streamed, &letters, 3)
+  let letterTrace = taken(&trace)
+
+  let checks = Test.suite("Compose", &[
+      Test.equals("a request passes every layer in order", &fine, &Ok(8)),
+      Test.equals("pre-processors before, behaviors in registration order, post-processors after", &fineTrace, &[
+          "pre o", "pre c 4", "o1>", "c1>", "o2>", "c2>", "handle 4", "<c2", "<o2", "<c1", "<o1", "post c 8", "post o 8"
+        ]),
+      Test.equals("a failing pre-processor stops the request", &refusedEarly, &Err(Messaging.Raised("negative"))),
+      Test.equals("the rest of the pre-processors, the behaviors, and the handler never run", &earlyTrace, &[
+          "pre o", "pre c -1", "recover first", "recover second", "action o Raised(\"negative\")", "action c Raised(\"negative\")"
+        ]),
+      Test.equals("a failing post-processor replaces the response", &tooLarge, &Err(Messaging.Raised("too large"))),
+      Test.equals("later post-processors do not run after one fails", &largeTrace.contains("post o 120"), &false),
+      Test.equals("the first exception handler that answers wins", &recoveredFirst, &Ok(0)),
+      Test.equals("a recovered failure is never seen by exception actions", &firstTrace.filter(|line: Str| line.startsWith("action") || line.startsWith("recover")), &["recover first"]),
+      Test.equals("exception handlers are tried in registration order", &(recoveredSecond, secondTrace.filter(|line: Str| line.startsWith("recover"))), &(
+          Ok(99), ["recover first", "recover second"]
+        )),
+      Test.equals("an unrecovered failure reaches every exception action, open first", &(unrecovered, unrecoveredTrace.filter(|line: Str| line.startsWith("action"))), &(
+          Err(Messaging.Raised("unlucky")), ["action o Raised(\"unlucky\")", "action c Raised(\"unlucky\")"]
+        )),
+      Test.equals("with every failure in scope, actions see a failure that is then recovered", &(recoveredSeen, seenTrace.filter(|line: Str| line.startsWith("action"))), &(
+          Ok(0), ["action o Raised(\"unlucky\")", "action c Raised(\"unlucky\")"]
+        )),
+      Test.equals("a behavior may answer without running the handler", &shortCircuited, &Err(Messaging.Refused("closed"))),
+      Test.equals("a behavior may hand the rest of the pipeline another context", &passedContext, &Err(Messaging.Cancelled("the deadline passed"))),
+      Test.equals("a publication reaches every handler", &publication, &Ok(())),
+      Test.equals("open and own notification handlers run in registration order", &publicationTrace, &["first 3", "hear o 3", "second 3"]),
+      Test.equals("a kind without handlers still reaches the open ones", &(openOnly, openOnlyTrace), &(Ok(()), ["hear o \"x\""])),
+      Test.equals("stream behaviors wrap the sink in registration order", &letterItems, &Ok(["a!", "c!"])),
+      Test.equals("an open stream behavior sees what the inner ones pass on", &letterTrace, &["o>", "o \"a!\"", "o \"c!\"", "<o"])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}
