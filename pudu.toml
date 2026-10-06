@@ -1,0 +1,14 @@
+[package]
+name = "@chrismichaelps/pudu-lang-mediator"
+version = "0.1.0"
+description = "In-process messaging for Pudu: requests, notifications, streams, pipeline behaviors, processors, and exception handling"
+license = "Apache-2.0"
+keywords = ["mediator", "cqrs", "requests", "notifications", "pipeline", "behaviors", "streams", "messaging"]
+language = ">=0.1.3 <0.2.0"
+source = "src"
+root = "PuduLangMediator"
+
+[dependencies]
+"@chrismichaelps/pudu-lang-validator" = "^0.1.1"
+"@chrismichaelps/pudu-lang-log" = "^0.1.0"
+"@chrismichaelps/pudu-lang-resilience" = "^0.1.0"

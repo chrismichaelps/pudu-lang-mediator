@@ -1,0 +1,23 @@
+/** @Mediator.Domain.Census.Module — what a registered kind is missing or has twice */
+module PuduLangMediator.Domain.Census
+
+import PuduLangMediator.Constants.Messages as Messages
+import PuduLangMediator.Utils.Template as Template
+
+/** @Mediator.Domain.Census.Census — the registrations counted for one kind */
+export type Census = { name: Str, handlers: Int, components: Int, collisions: Int, single: Bool }
+
+/// Every problem with one kind's registrations: a missing name, a name two kinds share, and, for
+/// a kind that takes exactly one handler, more than one or components without any.
+export fn problems(census: &Census) -> Array[Str] {
+  var found: Array[Str] = []
+  if census.name.isEmpty() { found = found.push(Messages.EMPTY_NAME) }
+  if census.collisions > 0 { found = found.push(Template.fill(Messages.NAME_TAKEN, &[census.name])) }
+  if census.single && census.handlers > 1 {
+    found = found.push(Template.fill(Messages.DUPLICATE_HANDLER, &[census.name, show(census.handlers)]))
+  }
+  if census.single && census.handlers == 0 && census.components > 0 {
+    found = found.push(Template.fill(Messages.WITHOUT_HANDLER, &[census.name]))
+  }
+  found
+}

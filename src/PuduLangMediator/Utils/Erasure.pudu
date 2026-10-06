@@ -1,0 +1,37 @@
+/** @Utils.Erasure.Module — values carried without naming their type */
+module PuduLangMediator.Utils.Erasure
+
+import Std.Sync as Sync
+
+/** @Utils.Erasure.Packed — a value whose type only its slot knows */
+export type Packed = fn() -> ()
+
+/** @Utils.Erasure.Slot — the one place a packed value of `T` reads back */
+export type Slot[T] = { lock: Sync.Mutex, held: Sync.Cell[Option[T]] }
+
+/// A slot of its own: values packed through it read back only through it.
+export fn slot[T]() -> Slot[T] { Slot{lock: Sync.mutex(), held: Sync.cell(None)} }
+
+/// The value packed so that only `target` reads it back.
+export fn pack[T](target: &Slot[T], value: T) -> Packed {
+  let held = target.held
+  fn() -> () { let _stored = Sync.set(&held, Some(value)) }
+}
+
+/// The value packed through `source`, or `None` when it was packed through another slot.
+export fn unpack[T](source: &Slot[T], packed: &Packed) -> Option[T] {
+  let held = source.held
+  let run = *packed
+  let read = Sync.withLock(&source.lock, fn() -> Option[T] {
+      let _cleared = Sync.set(&held, None)
+      run()
+      match Sync.swap(&held, None) {
+        case Ok(found) => found
+        case Err(problem) => panic("an erased value could not be read: " + show(problem))
+      }
+    })
+  match read {
+    case Ok(found) => found
+    case Err(problem) => panic("an erased value could not be locked: " + show(problem))
+  }
+}

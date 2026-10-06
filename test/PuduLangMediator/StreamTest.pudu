@@ -1,0 +1,42 @@
+/** @Test.Stream.Suite — stream kinds, emitting, envelopes, items, and answers */
+module PuduLangMediator.StreamTest
+
+import Std.Io as Io
+import Std.Sync as Sync
+import Std.Test as Test
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/// Runs the suite.
+fn main() -> Int {
+  let pages: Stream.Kind[Int, Str, Str] = Stream.kind("pages")
+  let seen: Sync.Cell[Array[Str]] = Sync.cell([])
+  let emitted: Messaging.Outcome[(), Str] = Stream.each(&["a", "b", "c", "d"], fn(item: Str) -> Bool {
+      let held = match Sync.get(&seen) {
+        case Ok(found) => found
+        case Err(_) => []
+      }
+      let _stored = Sync.set(&seen, held.push(item))
+      item != "b"
+    })
+  let item = Erasure.pack(&pages.items, "page 1")
+  let sealed = Stream.envelope(&pages, 3)
+  let answered = Message.answered(&pages.info, &pages.outcomes, Ok(()))
+  let checks = Test.suite("Stream", &[
+      Test.equals("a stream kind is a sequence", &pages.info.shape, &Message.Sequence),
+      Test.equals("tags are carried", &Stream.tagged(&pages, ["paged"]).info.tags, &["paged"]),
+      Test.equals("a fresh route is empty", &(Stream.route().handlers.length(), Stream.route().behaviors.length()), &(0, 0)),
+      Test.equals("emitting stops after the sink declines", &Sync.get(&seen), &Ok(["a", "b"])),
+      Test.equals("a declined stream still succeeds", &emitted, &Ok(())),
+      Test.equals("an item reads back through its kind", &Stream.itemOf(&pages, &item), &Some("page 1")),
+      Test.equals("an envelope opens for its kind", &Erasure.unpack(&pages.requests, &sealed.packed), &Some(3)),
+      Test.equals("the kind reads its own answer", &Stream.answerOf(&pages, &answered), &Some(Ok(())))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

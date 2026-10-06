@@ -1,0 +1,33 @@
+/** @Test.Notification.Suite — notification kinds, envelopes, and unheard answers */
+module PuduLangMediator.NotificationTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/// Runs the suite.
+fn main() -> Int {
+  let placed: Notification.Kind[Int, Str] = Notification.kind("orders.placed")
+  let other: Notification.Kind[Int, Str] = Notification.kind("orders.shipped")
+  let tagged = Notification.tagged(&placed, ["audited"])
+  let sealed = Notification.envelope(&placed, 5)
+  let failed = Message.answered(&placed.info, &placed.outcomes, Err(Messaging.Raised("mail down")))
+  let quiet = Message.unheard(&placed.info)
+  let checks = Test.suite("Notification", &[
+      Test.equals("a notification kind is an event", &placed.info.shape, &Message.Event),
+      Test.equals("tags are carried", &tagged.info.tags, &["audited"]),
+      Test.equals("a fresh route has no handlers", &Notification.route().handlers.length(), &0),
+      Test.equals("an envelope opens for its kind", &Erasure.unpack(&placed.notifications, &sealed.packed), &Some(5)),
+      Test.equals("an unheard publication of the kind succeeded", &Notification.answerOf(&placed, &quiet), &Some(Ok(()))),
+      Test.equals("an unheard publication of another kind is not this kind's", &Notification.answerOf(&other, &quiet), &None),
+      Test.equals("a failed publication reads back", &Notification.answerOf(&placed, &failed), &Some(Err(Messaging.Raised("mail down"))))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

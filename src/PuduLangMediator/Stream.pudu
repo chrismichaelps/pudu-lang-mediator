@@ -1,0 +1,69 @@
+/** @Mediator.Stream.Kind — requests answered by a sequence of items */
+module PuduLangMediator.Stream
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/** @Mediator.Stream.Sink — takes one item and answers whether it wants another */
+export type Sink[T] = fn(T) -> Bool
+
+/** @Mediator.Stream.Next — the rest of the stream pipeline */
+export type Next[T, E] = fn(Context.Context, Sink[T]) -> Messaging.Outcome[(), E]
+
+/** @Mediator.Stream.Handler — emits the items of one stream request */
+export type Handler[Q, T, E] = fn(Q, Context.Context, Sink[T]) -> Messaging.Outcome[(), E]
+
+/** @Mediator.Stream.Behavior — wraps the rest of the stream pipeline for one kind */
+export type Behavior[Q, T, E] = fn(Q, Context.Context, Sink[T], Next[T, E]) -> Messaging.Outcome[(), E]
+
+/** @Mediator.Stream.Route — every component registered for one kind */
+export type Route[Q, T, E] = { handlers: Array[Handler[Q, T, E]], behaviors: Array[Behavior[Q, T, E]] }
+
+/** @Mediator.Stream.Kind — the typed identity of one stream request */
+export type Kind[Q, T, E] = {
+  info: Message.Info,
+  routes: Erasure.Slot[Route[Q, T, E]],
+  invokers: Erasure.Slot[Handler[Q, T, E]],
+  requests: Erasure.Slot[Q],
+  items: Erasure.Slot[T],
+  outcomes: Erasure.Slot[Messaging.Outcome[(), E]]
+}
+
+/// A kind of stream request emitting `T` or failing with `E`. Make each kind once and share it.
+export fn kind[Q, T, E](name: Str) -> Kind[Q, T, E] {
+  Kind {
+    info: Message.Info{name: name, shape: Message.Sequence, tags: []},
+    routes: Erasure.slot(),
+    invokers: Erasure.slot(),
+    requests: Erasure.slot(),
+    items: Erasure.slot(),
+    outcomes: Erasure.slot()
+  }
+}
+
+/// The same kind carrying `tags` as well, which open components may read.
+export fn tagged[Q, T, E](subject: &Kind[Q, T, E], tags: Array[Str]) -> Kind[Q, T, E] {
+  Kind{..*subject, info: Message.Info{..subject.info, tags: subject.info.tags.concat(tags)}}
+}
+
+/// A route with no components.
+export fn route[Q, T, E]() -> Route[Q, T, E] { Route{handlers: [], behaviors: []} }
+
+/// Hands each item to the sink in order until it declines one.
+export fn each[T, E](items: &Array[T], sink: Sink[T]) -> Messaging.Outcome[(), E] {
+  for item in items {
+    if !sink(item) { return Ok(()) }
+  }
+  Ok(())
+}
+
+/// An envelope carrying `request`, for a sender that does not name its type.
+export fn envelope[Q, T, E](subject: &Kind[Q, T, E], request: Q) -> Message.Envelope { Message.sealed(&subject.info, &subject.requests, request) }
+
+/// An item an untyped stream emitted, when this kind emitted it.
+export fn itemOf[Q, T, E](subject: &Kind[Q, T, E], packed: &Erasure.Packed) -> Option[T] { Erasure.unpack(&subject.items, packed) }
+
+/// The outcome an answer holds, when this kind answered it.
+export fn answerOf[Q, T, E](subject: &Kind[Q, T, E], answer: &Message.Answer) -> Option[Messaging.Outcome[(), E]] { Message.read(&subject.outcomes, answer) }

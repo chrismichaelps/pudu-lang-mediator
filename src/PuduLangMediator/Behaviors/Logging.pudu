@@ -1,0 +1,86 @@
+/** @Mediator.Behaviors.Logging.Module — structured events for every request, stream, and notification */
+module PuduLangMediator.Behaviors.Logging
+
+import Std.Time as Time
+import PuduLangLog.Logger as Logger
+import PuduLangLog.Value as Value
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Open as Open
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Shared as Shared
+
+/** @Mediator.Behaviors.Logging.Recorder — writes one event per message start and end */
+export type Recorder = { logger: Logger.Logger }
+
+/// The event written when a message starts; its properties are the kind's name and shape.
+export const STARTED: Str = "Handling \{MessageName\} (\{MessageShape\})"
+
+/// The event written when a message succeeds; its properties are the name and elapsed milliseconds.
+export const SUCCEEDED: Str = "Handled \{MessageName\} in \{Elapsed\} ms"
+
+/// The event written when a stream ends; its properties are the name, item count, and elapsed milliseconds.
+export const STREAMED: Str = "Streamed \{MessageName\}: \{Items\} items in \{Elapsed\} ms"
+
+/// The event written when a message fails; its properties are the name, elapsed milliseconds, and failure.
+export const FAILED: Str = "\{MessageName\} failed in \{Elapsed\} ms: \{Failure\}"
+
+/// The event written when a notification is heard; its property is the kind's name.
+export const HEARD: Str = "Published \{MessageName\}"
+
+/// A recorder writing to `logger` under the source `PuduLangMediator`.
+export fn of(logger: Logger.Logger) -> Recorder { Recorder{logger: logger.forSource("PuduLangMediator")} }
+
+impl Open.Behavior for Recorder {
+  /// Writes a debug event before the request and an information or warning event after it.
+  fn handleRequest[Q, R, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    started(self, info)
+    let began = Time.elapsed()
+    let outcome = next(context)
+    let took = Time.elapsed() - began
+    match outcome {
+      case Ok(_) => self.logger.information(SUCCEEDED, [Value.text(info.name), Value.int(took)])
+      case Err(failure) => failed(self, info, took, &failure)
+    }
+    outcome
+  }
+}
+
+impl Open.StreamBehavior for Recorder {
+  /// Writes a debug event before the stream and, after it, the items it emitted or its failure.
+  fn handleStream[Q, T, E](self: &Self, request: &Q, info: &Message.Info, context: Context.Context, sink: Stream.Sink[T], next: Stream.Next[T, E]) -> Messaging.Outcome[(), E] {
+    started(self, info)
+    let began = Time.elapsed()
+    let emitted = Shared.shared(0)
+    let outcome = next(context, fn(item: T) -> Bool {
+        Shared.update(&emitted, |count: Int| count + 1)
+        sink(item)
+      })
+    let took = Time.elapsed() - began
+    match outcome {
+      case Ok(_) => self.logger.information(STREAMED, [Value.text(info.name), Value.int(Shared.current(&emitted)), Value.int(took)])
+      case Err(failure) => failed(self, info, took, &failure)
+    }
+    outcome
+  }
+}
+
+impl Open.NotificationHandler for Recorder {
+  /// Writes an information event for every notification published.
+  fn handleNotification[N, E](self: &Self, notification: &N, info: &Message.Info, context: Context.Context) -> Messaging.Outcome[(), E] {
+    self.logger.information(HEARD, [Value.text(info.name)])
+    Ok(())
+  }
+}
+
+/// Writes the debug event of a message starting.
+fn started(recorder: &Recorder, info: &Message.Info) -> () {
+  recorder.logger.debug(STARTED, [Value.text(info.name), Value.text(Message.shapeName(&info.shape))])
+}
+
+/// Writes the warning event of a message failing.
+fn failed[E](recorder: &Recorder, info: &Message.Info, took: Int, failure: &Messaging.Failure[E]) -> () {
+  recorder.logger.warning(FAILED, [Value.text(info.name), Value.int(took), Value.text(Messaging.describe(failure))])
+}

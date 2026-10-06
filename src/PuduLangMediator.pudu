@@ -1,0 +1,112 @@
+/** @Mediator.Root.Vocabulary — outcomes and failures of mediated messages */
+module PuduLangMediator
+
+import PuduLangMediator.Constants.Messages as Messages
+import PuduLangMediator.Utils.Template as Template
+
+/** @Mediator.Root.Violation — one rule a message broke */
+export type Violation = { property: Str, message: Str, code: Str }
+
+/** @Mediator.Root.Failure — why a mediated message produced no value */
+export type Failure[E]
+  = Raised(E)
+  | Unhandled(Str)
+  | Mismatched(Str)
+  | Refused(Str)
+  | Invalid(Array[Violation])
+  | Cancelled(Str)
+  | Crashed(Str)
+  | Aggregate(Array[Failure[E]])
+
+/** @Mediator.Root.Outcome — the value or failure of one message */
+export type Outcome[T, E] = Result[T, Failure[E]]
+
+/// An outcome holding a value.
+export fn succeed[T, E](value: T) -> Outcome[T, E] { Ok(value) }
+
+/// An outcome holding the handler's own error.
+export fn raise[T, E](problem: E) -> Outcome[T, E] { Err(Raised(problem)) }
+
+/// An outcome refused for `reason`; the failure an open component answers, since it cannot name `E`.
+export fn refuse[T, E](reason: Str) -> Outcome[T, E] { Err(Refused(reason)) }
+
+/// The outcome of a handler that answers a plain `Result`.
+export fn lift[T, E](result: Result[T, E]) -> Outcome[T, E] {
+  match result {
+    case Ok(value) => Ok(value)
+    case Err(problem) => Err(Raised(problem))
+  }
+}
+
+/// The handler's own error, when the failure is one.
+export fn raised[E](failure: &Failure[E]) -> Option[E] {
+  match failure {
+    case Raised(problem) => Some(problem)
+    case _ => None
+  }
+}
+
+/// Whether the failure is a cancellation.
+export fn isCancellation[E](failure: &Failure[E]) -> Bool {
+  match failure {
+    case Cancelled(_) => true
+    case _ => false
+  }
+}
+
+/// Every violation the failure holds, including those inside an aggregate, in order.
+export fn violations[E](failure: &Failure[E]) -> Array[Violation] {
+  match failure {
+    case Invalid(found) => found
+    case Aggregate(parts) => {
+      var found: Array[Violation] = []
+      for part in parts { found = found.concat(violations(&part)) }
+      found
+    }
+    case _ => []
+  }
+}
+
+/// No failure for none, the failure itself for one, and one flat `Aggregate` for several.
+export fn combine[E](failures: Array[Failure[E]]) -> Option[Failure[E]] {
+  var flat: Array[Failure[E]] = []
+  for failure in failures {
+    match failure {
+      case Aggregate(parts) => { flat = flat.concat(parts) }
+      case single => { flat = flat.push(single) }
+    }
+  }
+  match flat {
+    case [] => None
+    case [only] => Some(only)
+    case _ => Some(Aggregate(flat))
+  }
+}
+
+/// One sentence saying what went wrong.
+export fn describe[E](failure: &Failure[E]) -> Str {
+  match failure {
+    case Raised(problem) => Template.fill(Messages.RAISED, &[show(problem)])
+    case Unhandled(name) => Template.fill(Messages.UNHANDLED, &[name])
+    case Mismatched(name) => Template.fill(Messages.MISMATCHED, &[name])
+    case Refused(reason) => Template.fill(Messages.REFUSED, &[reason])
+    case Invalid(found) => {
+      let listed = found.map(|one: Violation| Template.fill(Messages.VIOLATION, &[one.property, one.message]))
+      Template.fill(Messages.INVALID, &[listed.join(Messages.SEPARATOR)])
+    }
+    case Cancelled(reason) => Template.fill(Messages.CANCELLED, &[reason])
+    case Crashed(reason) => Template.fill(Messages.CRASHED, &[reason])
+    case Aggregate(parts) => {
+      let listed = parts.map(|part: Failure[E]| describe(&part))
+      Template.fill(Messages.AGGREGATE, &[show(parts.length()), listed.join(Messages.SEPARATOR)])
+    }
+  }
+}
+
+/// One line naming an outcome.
+export fn summarize[T, E](outcome: &Outcome[T, E]) -> Str {
+  match outcome {
+    case Ok(value) => Template.fill(Messages.SUCCEEDED, &[show(value)])
+    case Err(failure) => describe(&failure)
+  }
+}

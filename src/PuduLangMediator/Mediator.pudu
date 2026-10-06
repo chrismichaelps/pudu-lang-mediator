@@ -1,0 +1,198 @@
+/** @Mediator.Mediator.Backbone — routes requests, notifications, and streams to their handlers */
+module PuduLangMediator.Mediator
+
+import Std.HashMap as HashMap
+import PuduLangMediator.Catalog as Catalog
+import PuduLangMediator.Compose as Compose
+import PuduLangMediator.Constants.Messages as Messages
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Publishing as Publishing
+import PuduLangMediator.Reader as Reader
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+import PuduLangMediator.Utils.Erasure as Erasure
+import PuduLangMediator.Utils.Shared as Shared
+import PuduLangMediator.Utils.Template as Template
+
+/** @Mediator.Mediator.Options — how notifications are published and failures observed */
+export type Options = { publisher: dynamic Publishing.Strategy, actionScope: Catalog.Scope }
+
+/** @Mediator.Mediator.Mediator — every kind's composed pipeline, by shape and name */
+export type Mediator = {
+  requests: HashMap.HashMap[Str, Catalog.Compiled],
+  notifications: HashMap.HashMap[Str, Catalog.Compiled],
+  streams: HashMap.HashMap[Str, Catalog.Compiled],
+  assembly: Catalog.Assembly
+}
+
+/** @Mediator.Mediator.Invalid — every reason a mediator could not be built */
+export type Invalid = { problems: Array[Str] }
+
+/** @Mediator.Mediator.Located — a kind's composed pipeline, its absence, or another kind's */
+type Located[H] = Ready(H) | Missing | Foreign
+
+/// Sequential publishing, and exception actions that observe only failures no exception handler
+/// answered.
+export fn defaults() -> Options { Options{publisher: Publishing.Sequential{}, actionScope: Catalog.ForUnhandled} }
+
+/// A mediator of `registrations` with the default options.
+export fn build(registrations: Array[Registration.Registration]) -> Result[Mediator, Invalid] { buildWith(&defaults(), registrations) }
+
+/// A mediator of `registrations`, applied in order, or every problem found in them: a kind without
+/// a name, two kinds under one name, and a request or stream kind without exactly one handler.
+export fn buildWith(options: &Options, registrations: Array[Registration.Registration]) -> Result[Mediator, Invalid] {
+  var catalog = Catalog.empty(options.publisher, options.actionScope)
+  for registration in registrations { catalog = (registration.apply)(catalog) }
+  let problems = Catalog.problems(&catalog)
+  if !problems.isEmpty() { return Err(Invalid{problems: problems}) }
+  let assembly = catalog.assembly
+  Ok(Mediator {
+      requests: Catalog.compile(&catalog.requests, &assembly),
+      notifications: Catalog.compile(&catalog.notifications, &assembly),
+      streams: Catalog.compile(&catalog.streams, &assembly),
+      assembly: assembly
+    })
+}
+
+/// Every problem in one sentence.
+export fn explain(invalid: &Invalid) -> Str { Template.fill(Messages.MEDIATOR_INVALID, &[invalid.problems.join(Messages.SEPARATOR)]) }
+
+/// Every registered kind: requests, then notifications, then streams, each in registration order.
+export fn kinds(mediator: &Mediator) -> Array[Message.Info] {
+  var found: Array[Message.Info] = []
+  for table in [mediator.requests, mediator.notifications, mediator.streams] {
+    for compiled in HashMap.values(&table) { found = found.push(compiled.info) }
+  }
+  found
+}
+
+/// The composed pipeline of a request kind, to call many times without looking it up again;
+/// `Unhandled` when the kind has no handler and `Mismatched` when another kind took its name.
+export fn resolve[Q, R, E](mediator: &Mediator, subject: &Request.Kind[Q, R, E]) -> Result[Request.Handler[Q, R, E], Messaging.Failure[E]] {
+  match located(&mediator.requests, subject.info.name, &subject.invokers) {
+    case Ready(invoke) => Ok(invoke)
+    case Missing => Err(Messaging.Unhandled(subject.info.name))
+    case Foreign => Err(Messaging.Mismatched(subject.info.name))
+  }
+}
+
+/// Sends a request through its pipeline with a fresh context.
+export fn send[Q, R, E](mediator: &Mediator, subject: &Request.Kind[Q, R, E], request: Q) -> Messaging.Outcome[R, E] {
+  sendWith(mediator, subject, request, Context.create())
+}
+
+/// Sends a request through its pipeline with the given context.
+export fn sendWith[Q, R, E](mediator: &Mediator, subject: &Request.Kind[Q, R, E], request: Q, context: Context.Context) -> Messaging.Outcome[R, E] {
+  let invoke = resolve(mediator, subject) ?
+  invoke(request, context)
+}
+
+/// Sends a request whose type the caller does not name, with a fresh context.
+export fn dispatch(mediator: &Mediator, envelope: Message.Envelope) -> Message.Answer { dispatchWith(mediator, envelope, Context.create()) }
+
+/// Sends a request whose type the caller does not name, with the given context. Read the answer
+/// back with the kind's `answerOf`.
+export fn dispatchWith(mediator: &Mediator, envelope: Message.Envelope, context: Context.Context) -> Message.Answer {
+  match HashMap.get(&mediator.requests, &envelope.info.name) {
+    case Some(compiled) => answering(&compiled, envelope, context)
+    case None => Message.undelivered(&envelope.info, Message.NoRoute(envelope.info.name))
+  }
+}
+
+/// Publishes a notification to every handler with a fresh context.
+export fn publish[N, E](mediator: &Mediator, subject: &Notification.Kind[N, E], notification: N) -> Messaging.Outcome[(), E] {
+  publishWith(mediator, subject, notification, Context.create())
+}
+
+/// Publishes a notification to its handlers and the open ones, through the mediator's publishing
+/// strategy, with the given context. A kind with no handlers succeeds without running anything.
+export fn publishWith[N, E](mediator: &Mediator, subject: &Notification.Kind[N, E], notification: N, context: Context.Context) -> Messaging.Outcome[(), E] {
+  match located(&mediator.notifications, subject.info.name, &subject.invokers) {
+    case Ready(invoke) => invoke(notification, context)
+    case Missing => (Compose.publication(&subject.info, &Notification.route(), &mediator.assembly))(notification, context)
+    case Foreign => Err(Messaging.Mismatched(subject.info.name))
+  }
+}
+
+/// Publishes a notification whose type the caller does not name, with a fresh context.
+export fn broadcast(mediator: &Mediator, envelope: Message.Envelope) -> Message.Answer { broadcastWith(mediator, envelope, Context.create()) }
+
+/// Publishes a notification whose type the caller does not name, with the given context. A kind
+/// the mediator does not know is answered as heard by nobody.
+export fn broadcastWith(mediator: &Mediator, envelope: Message.Envelope, context: Context.Context) -> Message.Answer {
+  match HashMap.get(&mediator.notifications, &envelope.info.name) {
+    case Some(compiled) => answering(&compiled, envelope, context)
+    case None => Message.unheard(&envelope.info)
+  }
+}
+
+/// Runs a stream request with a fresh context, handing each item to `sink` until it declines one.
+export fn stream[Q, T, E](mediator: &Mediator, subject: &Stream.Kind[Q, T, E], request: Q, sink: Stream.Sink[T]) -> Messaging.Outcome[(), E] {
+  streamWith(mediator, subject, request, Context.create(), sink)
+}
+
+/// Runs a stream request with the given context, handing each item to `sink` until it declines one.
+export fn streamWith[Q, T, E](mediator: &Mediator, subject: &Stream.Kind[Q, T, E], request: Q, context: Context.Context, sink: Stream.Sink[T]) -> Messaging.Outcome[(), E] {
+  match located(&mediator.streams, subject.info.name, &subject.invokers) {
+    case Ready(invoke) => invoke(request, context, sink)
+    case Missing => Err(Messaging.Unhandled(subject.info.name))
+    case Foreign => Err(Messaging.Mismatched(subject.info.name))
+  }
+}
+
+/// Every item of a stream request, or its failure.
+export fn collect[Q, T, E](mediator: &Mediator, subject: &Stream.Kind[Q, T, E], request: Q) -> Messaging.Outcome[Array[T], E] {
+  let gathered: Shared.Shared[Array[T]] = Shared.shared([])
+  stream(mediator, subject, request, fn(item: T) -> Bool {
+      Shared.update(&gathered, fn(held: Array[T]) -> Array[T] { held.push(item) })
+      true
+    }) ?
+  Ok(Shared.current(&gathered))
+}
+
+/// A reader of a stream request produced on its own thread with the given context, holding at
+/// most `capacity` items ahead of the consumer. Close it once done with it.
+export fn reader[Q, T, E](mediator: &Mediator, subject: &Stream.Kind[Q, T, E], request: Q, context: &Context.Context, capacity: Int) -> Reader.Reader[T, E] {
+  let held = *mediator
+  let kind = *subject
+  Reader.open(capacity, context, fn(passed: Context.Context, sink: Stream.Sink[T]) -> Messaging.Outcome[(), E] { streamWith(&held, &kind, request, passed, sink) })
+}
+
+/// Runs a stream request whose type the caller does not name, handing each packed item to `sink`
+/// until it declines one. Read items back with the kind's `itemOf`, and the answer with its `answerOf`.
+export fn streamEnvelope(mediator: &Mediator, envelope: Message.Envelope, context: Context.Context, sink: fn(Erasure.Packed) -> Bool) -> Message.Answer {
+  match HashMap.get(&mediator.streams, &envelope.info.name) {
+    case Some(compiled) => {
+      match compiled.dispatch {
+        case Catalog.Streaming(run) => run(envelope, context, sink)
+        case Catalog.Answering(_) => Message.undelivered(&envelope.info, Message.WrongKind(envelope.info.name))
+      }
+    }
+    case None => Message.undelivered(&envelope.info, Message.NoRoute(envelope.info.name))
+  }
+}
+
+/// A compiled request or notification answering an envelope.
+fn answering(compiled: &Catalog.Compiled, envelope: Message.Envelope, context: Context.Context) -> Message.Answer {
+  match compiled.dispatch {
+    case Catalog.Answering(run) => run(envelope, context)
+    case Catalog.Streaming(_) => Message.undelivered(&envelope.info, Message.WrongKind(envelope.info.name))
+  }
+}
+
+/// The composed pipeline registered under `name`, read through `invokers`.
+fn located[H](table: &HashMap.HashMap[Str, Catalog.Compiled], name: Str, invokers: &Erasure.Slot[H]) -> Located[H] {
+  match HashMap.get(table, &name) {
+    case Some(compiled) => {
+      match Erasure.unpack(invokers, &compiled.invoke) {
+        case Some(invoke) => Ready(invoke)
+        case None => Foreign
+      }
+    }
+    case None => Missing
+  }
+}

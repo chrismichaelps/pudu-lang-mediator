@@ -1,0 +1,46 @@
+/** @Test.Message.Suite — shapes, tags, envelopes, and answers */
+module PuduLangMediator.MessageTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/// Runs the suite.
+fn main() -> Int {
+  let info = Message.Info{name: "orders.get", shape: Message.Query, tags: ["audited"]}
+  let outcomes: Erasure.Slot[Messaging.Outcome[Int, Str]] = Erasure.slot()
+  let others: Erasure.Slot[Messaging.Outcome[Int, Str]] = Erasure.slot()
+  let messages: Erasure.Slot[Str] = Erasure.slot()
+  let good = Message.answered(&info, &outcomes, Ok(3))
+  let bad = Message.answered(&info, &outcomes, Err(Messaging.Raised("no")))
+  let lost = Message.undelivered(&info, Message.NoRoute("orders.get"))
+  let foreign = Message.undelivered(&info, Message.WrongKind("orders.get"))
+  let quiet = Message.unheard(&info)
+  let sealed = Message.sealed(&info, &messages, "payload")
+  let checks = Test.suite("Message", &[
+      Test.equals("every shape is named", &[Message.Query, Message.Command, Message.Event, Message.Sequence].map(|shape: Message.Shape| Message.shapeName(&shape)), &[
+          "query", "command", "event", "sequence"
+        ]),
+      Test.that("a carried tag is found", Message.hasTag(&info, "audited")),
+      Test.not("a missing tag is not", Message.hasTag(&info, "cached")),
+      Test.equals("a value answer reads back", &Message.read(&outcomes, &good), &Some(Ok(3))),
+      Test.equals("a value answer is summarized", &(good.failed, good.summary), &(false, "Ok(3)")),
+      Test.equals("a failed answer is marked", &(bad.failed, bad.summary), &(true, "The handler failed: \"no\"")),
+      Test.equals("another kind's slot does not read an answer", &Message.read(&others, &good), &None),
+      Test.equals("an unrouted envelope answers unhandled", &Message.read(&outcomes, &lost), &Some(Err(Messaging.Unhandled("orders.get")))),
+      Test.equals("a misrouted envelope answers mismatched", &Message.read(&outcomes, &foreign), &Some(Err(Messaging.Mismatched("orders.get")))),
+      Test.equals("an undelivered answer is failed and described", &(lost.failed, lost.summary), &(true, "No handler is registered for 'orders.get'.")),
+      Test.equals("an unheard answer is quiet", &(quiet.failed, quiet.summary), &(false, "Ok(())")),
+      Test.equals("an unheard answer holds no typed outcome", &Message.read(&outcomes, &quiet), &None),
+      Test.equals("an envelope shows its message", &sealed.summary, &"\"payload\""),
+      Test.equals("an envelope's message reads back through its slot", &Erasure.unpack(&messages, &sealed.packed), &Some("payload")),
+      Test.equals("a fault's failure suits any error type", &Message.failureOf(&Message.NoRoute("x")), &Messaging.Unhandled("x"))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

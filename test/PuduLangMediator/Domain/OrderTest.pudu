@@ -1,0 +1,35 @@
+/** @Test.Domain.Order.Suite — registration order of open and own components */
+module PuduLangMediator.Domain.OrderTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Domain.Order as Order
+
+/// Runs the suite.
+fn main() -> Int {
+  let marks = [
+    Order.Open(Order.Behaviors, 0),
+    Order.Closed(Order.Behaviors, "a"),
+    Order.Closed(Order.PreProcessors, "a"),
+    Order.Closed(Order.Behaviors, "b"),
+    Order.Open(Order.Behaviors, 1),
+    Order.Closed(Order.Behaviors, "a"),
+    Order.Open(Order.PreProcessors, 0),
+    Order.Closed(Order.Behaviors, "a")
+  ]
+  let checks = Test.suite("Domain.Order", &[
+      Test.equals("open and own behaviors interleave in registration order", &Order.picks(&marks, Order.Behaviors, "a"), &[
+          Order.Shared(0), Order.Own(0), Order.Shared(1), Order.Own(1), Order.Own(2)
+        ]),
+      Test.equals("another kind's own components are skipped", &Order.picks(&marks, Order.Behaviors, "b"), &[Order.Shared(0), Order.Own(0), Order.Shared(1)]),
+      Test.equals("each layer is ordered on its own", &Order.picks(&marks, Order.PreProcessors, "a"), &[Order.Own(0), Order.Shared(0)]),
+      Test.equals("a kind with nothing of its own gets only the open ones", &Order.picks(&marks, Order.Behaviors, "c"), &[Order.Shared(0), Order.Shared(1)]),
+      Test.equals("a layer with no marks picks nothing", &Order.picks(&marks, Order.StreamBehaviors, "a"), &[]),
+      Test.equals("no marks pick nothing", &Order.picks(&[], Order.Behaviors, "a"), &[])
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

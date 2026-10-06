@@ -1,0 +1,59 @@
+/** @Test.Behaviors.Logging.Suite — structured events for requests, streams, and notifications */
+module PuduLangMediator.Behaviors.LoggingTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangLog.Configuration as Configuration
+import PuduLangLog as Log
+import PuduLangLog.Sinks.Memory as Memory
+import PuduLangMediator.Behaviors.Logging as Logging
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+
+/// Runs the suite.
+fn main() -> Int {
+  let memory = Memory.create()
+  let logger = Configuration.create().minimumLevel(Log.Debug).writeTo(Memory.sink(&memory)).createLogger()
+  let recorder = Logging.of(logger)
+  let price: Request.Kind[Str, Int, Str] = Request.kind("prices.get")
+  let ticks: Stream.Kind[Int, Int, Str] = Stream.kind("ticks")
+  let changed: Notification.Kind[Int, Str] = Notification.kind("prices.changed")
+  let mediator = match Mediator.build([
+      Registration.openBehavior(recorder),
+      Registration.openStreamBehavior(recorder),
+      Registration.openNotificationHandler("log", recorder),
+      Registration.handler(&price, |item: Str, _context: Context.Context| if item == "gold" { Ok(1900) } else { Messaging.raise("unknown item") }),
+      Registration.streamHandler(&ticks, fn(count: Int, _context: Context.Context, sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+          Stream.each(&[1, 2, 3, 4].slice(0, count), sink)
+        }),
+      Registration.notificationHandler(&changed, "noop", |_value: Int, _context: Context.Context| Ok(()))
+    ]) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let found = Mediator.send(&mediator, &price, "gold")
+  let missing = Mediator.send(&mediator, &price, "lead")
+  let streamed = Mediator.collect(&mediator, &ticks, 3)
+  let published = Mediator.publish(&mediator, &changed, 5)
+  let messages = Memory.messages(&memory)
+  let checks = Test.suite("Behaviors.Logging", &[
+      Test.equals("logging changes no outcome", &(found, missing, streamed, published), &(Ok(1900), Err(Messaging.Raised("unknown item")), Ok([1, 2, 3]), Ok(()))),
+      Test.equals("every start is a debug event", &Memory.withTemplate(&memory, Logging.STARTED).length(), &3),
+      Test.that("a start names the kind and its shape", messages[0] == "Handling \"prices.get\" (\"query\")"),
+      Test.equals("a success is an information event", &Memory.withTemplate(&memory, Logging.SUCCEEDED).map(|event: Log.Event| event.level), &[Log.Information]),
+      Test.equals("a failure is a warning event", &Memory.withTemplate(&memory, Logging.FAILED).map(|event: Log.Event| event.level), &[Log.Warning]),
+      Test.that("a failure names what went wrong", messages[3].contains("The handler failed: \\\"unknown item\\\"")),
+      Test.that("a stream reports how many items it emitted", messages[5].startsWith("Streamed \"ticks\": 3 items in ")),
+      Test.equals("a publication is heard", &Memory.withTemplate(&memory, Logging.HEARD).length(), &1)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

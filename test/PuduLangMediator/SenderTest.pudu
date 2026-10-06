@@ -1,0 +1,63 @@
+/** @Test.Sender.Suite — components depending on the sender seam, with a mediator or a double */
+module PuduLangMediator.SenderTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Sender as Sender
+import PuduLangMediator.Stream as Stream
+
+/** @Test.Sender.Refusing — a test double that refuses everything */
+type Refusing = {}
+
+impl Sender.Sender for Refusing {
+  /// Refuses the request.
+  fn send[Q, R, E](self: &Self, subject: &Request.Kind[Q, R, E], request: Q, context: Context.Context) -> Messaging.Outcome[R, E] { Messaging.refuse("double") }
+
+  /// Answers that nothing is routed.
+  fn dispatch(self: &Self, envelope: Message.Envelope, context: Context.Context) -> Message.Answer { Message.undelivered(&envelope.info, Message.NoRoute("double")) }
+
+  /// Refuses the stream.
+  fn stream[Q, T, E](self: &Self, subject: &Stream.Kind[Q, T, E], request: Q, context: Context.Context, sink: Stream.Sink[T]) -> Messaging.Outcome[(), E] {
+    Messaging.refuse("double")
+  }
+}
+
+/// A component that only sends: it greets through whatever sender it is given.
+fn greeting(sender: dynamic Sender.Sender, greet: &Request.Kind[Str, Str, Str], name: Str) -> Messaging.Outcome[Str, Str] {
+  sender.send(greet, name, Context.create())
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let greet: Request.Kind[Str, Str, Str] = Request.kind("greet")
+  let digits: Stream.Kind[Int, Int, Str] = Stream.kind("digits")
+  let mediator = match Mediator.build([
+      Registration.handler(&greet, |name: Str, _context: Context.Context| Ok("hello " + name)),
+      Registration.streamHandler(&digits, fn(count: Int, _context: Context.Context, sink: Stream.Sink[Int]) -> Messaging.Outcome[(), Str] {
+          Stream.each(&[1, 2, 3].slice(0, count), sink)
+        })
+    ]) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let real: dynamic Sender.Sender = mediator
+  let double: dynamic Sender.Sender = Refusing{}
+  let checks = Test.suite("Sender", &[
+      Test.equals("a mediator stands for a sender", &greeting(real, &greet, "ada"), &Ok("hello ada")),
+      Test.equals("a double stands for one too", &greeting(double, &greet, "ada"), &Err(Messaging.Refused("double"))),
+      Test.equals("a mediator dispatches as a sender", &Request.answerOf(&greet, &real.dispatch(Request.envelope(&greet, "env"), Context.create())), &Some(Ok("hello env"))),
+      Test.equals("a mediator streams as a sender", &real.stream(&digits, 2, Context.create(), |_item: Int| true), &Ok(())),
+      Test.that("a double's dispatch is undelivered", double.dispatch(Request.envelope(&greet, "env"), Context.create()).failed)
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

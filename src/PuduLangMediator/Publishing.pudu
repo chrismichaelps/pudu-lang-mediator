@@ -1,0 +1,134 @@
+/** @Mediator.Publishing.Seam — how a notification reaches its handlers */
+module PuduLangMediator.Publishing
+
+import Std.Concurrent as Concurrent
+import Std.Math as Math
+import Std.Result as Result
+import Std.Sync as Sync
+import PuduLangMediator.Context as Context
+import PuduLangMediator as Messaging
+import PuduLangMediator.Utils.Threads as Threads
+
+/** @Mediator.Publishing.Executor — one handler, ready to run with a context */
+export type Executor[E] = { handler: Str, run: fn(Context.Context) -> Messaging.Outcome[(), E] }
+
+/** @Mediator.Publishing.Strategy — runs the executors of one publication */
+export trait Strategy {
+  /// Runs the executors and answers the publication's outcome.
+  fn publish[E](self: &Self, executors: &Array[Executor[E]], context: Context.Context) -> Messaging.Outcome[(), E]
+}
+
+/** @Mediator.Publishing.Sequential — one handler at a time, stopping at the first failure */
+export type Sequential = {}
+
+/** @Mediator.Publishing.Continuing — one handler at a time, every handler, every failure */
+export type Continuing = {}
+
+/** @Mediator.Publishing.Parallel — every handler on its own thread at once */
+export type Parallel = {}
+
+/** @Mediator.Publishing.Bounded — every handler, at most `workers` at a time */
+export type Bounded = { workers: Int }
+
+impl Strategy for Sequential {
+  /// Runs each executor in order once the context is still live, and answers the first failure.
+  fn publish[E](self: &Self, executors: &Array[Executor[E]], context: Context.Context) -> Messaging.Outcome[(), E] {
+    for executor in executors {
+      Context.check(&context) ?
+      (executor.run)(context) ?
+    }
+    Ok(())
+  }
+}
+
+impl Strategy for Continuing {
+  /// Runs every executor in order and answers every failure, combined.
+  fn publish[E](self: &Self, executors: &Array[Executor[E]], context: Context.Context) -> Messaging.Outcome[(), E] {
+    var failures: Array[Messaging.Failure[E]] = []
+    for executor in executors {
+      match (executor.run)(context) {
+        case Ok(_) => {}
+        case Err(failure) => { failures = failures.push(failure) }
+      }
+    }
+    settled(failures)
+  }
+}
+
+impl Strategy for Parallel {
+  /// Starts every executor on its own thread, waits for all, and answers every failure, combined.
+  fn publish[E](self: &Self, executors: &Array[Executor[E]], context: Context.Context) -> Messaging.Outcome[(), E] {
+    let cells = executors.map(|_executor: Executor[E]| outcomeCell())
+    var started: Array[Result[Concurrent.Task, Concurrent.ConcurrentError]] = []
+    var index = 0
+    for executor in executors {
+      let cell = cells[index]
+      started = started.push(Concurrent.start(fn() -> () { let _stored = Sync.set(&cell, Some((executor.run)(context))) }))
+      index = index + 1
+    }
+    var outcomes: Array[Messaging.Outcome[(), E]] = []
+    index = 0
+    for attempt in started {
+      let joined = Result.andThen(attempt, |worker: Concurrent.Task| Concurrent.join(&worker))
+      outcomes = outcomes.push(collected(&cells[index], joined))
+      index = index + 1
+    }
+    settled(failuresOf(&outcomes))
+  }
+}
+
+impl Strategy for Bounded {
+  /// Runs every executor with at most `workers` running at once (one when fewer are asked for),
+  /// waits for all, and answers every failure, combined.
+  fn publish[E](self: &Self, executors: &Array[Executor[E]], context: Context.Context) -> Messaging.Outcome[(), E] {
+    let cells = executors.map(|_executor: Executor[E]| outcomeCell())
+    var actions: Array[fn() -> ()] = []
+    var index = 0
+    for executor in executors {
+      let cell = cells[index]
+      actions = actions.push(fn() -> () {
+          let contained = Concurrent.contain(fn() -> () { let _stored = Sync.set(&cell, Some((executor.run)(context))) })
+          if let Err(problem) = contained { let _crashed = Sync.set(&cell, Some(Err(Messaging.Crashed(Threads.reasonOf(&problem))))) }
+        })
+      index = index + 1
+    }
+    let ran = Concurrent.parallelBounded(&actions, Math.max(self.workers, 1))
+    var outcomes: Array[Messaging.Outcome[(), E]] = []
+    for cell in cells { outcomes = outcomes.push(collected(&cell, ran)) }
+    settled(failuresOf(&outcomes))
+  }
+}
+
+/// An empty place for one executor's outcome.
+fn outcomeCell[E]() -> Sync.Cell[Option[Messaging.Outcome[(), E]]] { Sync.cell(None) }
+
+/// The outcome an executor stored, or `Crashed` when its thread stopped before storing one.
+fn collected[E](cell: &Sync.Cell[Option[Messaging.Outcome[(), E]]], joined: Result[(), Concurrent.ConcurrentError]) -> Messaging.Outcome[(), E] {
+  match Sync.get(cell) {
+    case Ok(Some(outcome)) => outcome
+    case Ok(None) => {
+      match joined {
+        case Err(problem) => Err(Messaging.Crashed(Threads.reasonOf(&problem)))
+        case Ok(_) => Err(Messaging.Crashed("the handler stored no outcome"))
+      }
+    }
+    case Err(problem) => Err(Messaging.Crashed(show(problem)))
+  }
+}
+
+/// The failures among outcomes, in order.
+fn failuresOf[E](outcomes: &Array[Messaging.Outcome[(), E]]) -> Array[Messaging.Failure[E]] {
+  var failures: Array[Messaging.Failure[E]] = []
+  for outcome in outcomes {
+    if let Err(failure) = outcome { failures = failures.push(failure) }
+  }
+  failures
+}
+
+/// `Ok` when nothing failed, otherwise the failures combined.
+fn settled[E](failures: Array[Messaging.Failure[E]]) -> Messaging.Outcome[(), E] {
+  match Messaging.combine(failures) {
+    case Some(failure) => Err(failure)
+    case None => Ok(())
+  }
+}

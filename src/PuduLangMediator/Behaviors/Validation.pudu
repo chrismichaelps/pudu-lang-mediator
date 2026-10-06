@@ -1,0 +1,44 @@
+/** @Mediator.Behaviors.Validation.Module — requests and streams refused when their rules fail */
+module PuduLangMediator.Behaviors.Validation
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator as Messaging
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+import PuduLangMediator.Stream as Stream
+import PuduLangValidator.Result as Validated
+import PuduLangValidator.Validator as Validator
+
+/// A behavior answering `Invalid` with every violation when `validator` rejects the request, and
+/// running the rest of the pipeline otherwise.
+export fn behavior[Q, R, E](validator: Validator.Validator[Q]) -> Request.Behavior[Q, R, E] {
+  fn(request: Q, context: Context.Context, next: Request.Next[R, E]) -> Messaging.Outcome[R, E] {
+    let result = Validator.validate(&validator, request)
+    if result.isValid { next(context) } else { Err(Messaging.Invalid(violationsOf(&result))) }
+  }
+}
+
+/// The validation behavior of one request kind.
+export fn register[Q, R, E](subject: &Request.Kind[Q, R, E], validator: Validator.Validator[Q]) -> Registration.Registration {
+  Registration.behavior(subject, behavior(validator))
+}
+
+/// A stream behavior answering `Invalid` before any item when `validator` rejects the request.
+export fn streamBehavior[Q, T, E](validator: Validator.Validator[Q]) -> Stream.Behavior[Q, T, E] {
+  fn(request: Q, context: Context.Context, sink: Stream.Sink[T], next: Stream.Next[T, E]) -> Messaging.Outcome[(), E] {
+    let result = Validator.validate(&validator, request)
+    if result.isValid { next(context, sink) } else { Err(Messaging.Invalid(violationsOf(&result))) }
+  }
+}
+
+/// The stream validation behavior of one stream kind.
+export fn registerStream[Q, T, E](subject: &Stream.Kind[Q, T, E], validator: Validator.Validator[Q]) -> Registration.Registration {
+  Registration.streamBehavior(subject, streamBehavior(validator))
+}
+
+/// Every failure of a validation result as a violation, in rule order.
+export fn violationsOf(result: &Validated.ValidationResult) -> Array[Messaging.Violation] {
+  result.errors.map(fn(failure: Validated.Failure) -> Messaging.Violation {
+      Messaging.Violation{property: failure.propertyName, message: failure.errorMessage, code: failure.errorCode}
+    })
+}

@@ -1,0 +1,61 @@
+/** @Test.Context.Suite — typed items, shared tokens, expiry, and cancellation */
+module PuduLangMediator.ContextTest
+
+import Std.Concurrent.Cancel as Cancel
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Context as Context
+import PuduLangMediator as Messaging
+
+/** @Test.Context.Tenant — a record stored as an item */
+type Tenant = { id: Int, region: Str }
+
+/// Runs the suite.
+fn main() -> Int {
+  let context = Context.create()
+  let tenant: Context.Key[Tenant] = Context.key("tenant")
+  let attempts: Context.Key[Int] = Context.key("attempts")
+  let lookalike: Context.Key[Int] = Context.key("attempts")
+  Context.set(&context, &tenant, Tenant{id: 7, region: "eu"})
+  Context.set(&context, &attempts, 1)
+  Context.set(&context, &attempts, 2)
+  let shared = Context.withToken(&context, Cancel.token())
+  Context.set(&shared, &Context.key("flag"), true)
+  let removable: Context.Key[Str] = Context.key("note")
+  Context.set(&context, &removable, "temporary")
+  Context.remove(&context, &removable)
+  let stopping = Context.create()
+  let before: Result[(), Messaging.Failure[Str]] = Context.check(&stopping)
+  Context.cancel(&stopping, "done")
+  Context.cancel(&stopping, "later")
+  let after: Result[(), Messaging.Failure[Str]] = Context.check(&stopping)
+  let paused: Result[(), Messaging.Failure[Str]] = Context.pause(&stopping, 1000)
+  let quick: Result[(), Messaging.Failure[Str]] = Context.pause(&Context.create(), 1)
+  let expired = Context.expiring(&Context.create(), 0)
+  let parent = Context.create()
+  let child = Context.expiring(&parent, 60000)
+  Context.cancel(&parent, "parent")
+  let checks = Test.suite("Context", &[
+      Test.equals("a record item reads back", &Context.get(&context, &tenant), &Some(Tenant{id: 7, region: "eu"})),
+      Test.equals("a later item replaces an earlier one", &Context.get(&context, &attempts), &Some(2)),
+      Test.equals("a key made separately under the same name does not read it", &Context.get(&context, &lookalike), &None),
+      Test.that("but the name is present", Context.has(&context, &lookalike)),
+      Test.equals("getOr falls back for an absent item", &Context.getOr(&context, &Context.key("missing"), 9), &9),
+      Test.equals("getOr answers a present item", &Context.getOr(&context, &attempts, 9), &2),
+      Test.equals("a context with another token shares items", &Context.names(&context), &["tenant", "attempts", "flag"]),
+      Test.not("a removed item is gone", Context.has(&context, &removable)),
+      Test.equals("a live context checks out", &before, &Ok(())),
+      Test.equals("the first cancellation reason is kept", &after, &Err(Messaging.Cancelled("cancelled: done"))),
+      Test.that("a cancelled context is stopped", Context.stopped(&stopping)),
+      Test.equals("a pause on a cancelled context ends at once", &paused, &Err(Messaging.Cancelled("cancelled: done"))),
+      Test.equals("a short pause completes", &quick, &Ok(())),
+      Test.that("an expiring context stops when its time is up", Context.stopped(&expired)),
+      Test.that("an expiring context stops with its parent", Context.stopped(&child)),
+      Test.that("a cancellable context observes its token", Context.stopped(&Context.cancellable(Cancel.expiring(0))))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

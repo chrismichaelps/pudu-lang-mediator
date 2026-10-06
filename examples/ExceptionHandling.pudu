@@ -1,0 +1,47 @@
+/** @Examples.ExceptionHandling.Program — exception handlers that recover and actions that observe */
+module ExceptionHandling
+
+import Std.Io as Io
+import PuduLangMediator.Catalog as Catalog
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator as Messaging
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Request as Request
+
+/** @Examples.ExceptionHandling.Fault — what the lookup can fail with */
+type Fault = NotFound | Timeout
+
+/// Recovers missing profiles with a default and reports every failure that remains.
+fn main() -> Int {
+  let profile: Request.Kind[Int, Str, Fault] = Request.kind("profiles.get")
+  let registrations = [
+    Registration.handler(&profile, fn(id: Int, _context: Context.Context) -> Messaging.Outcome[Str, Fault] {
+        match id {
+          case 1 => Ok("ada")
+          case 2 => Messaging.raise(NotFound)
+          case _ => Messaging.raise(Timeout)
+        }
+      }),
+    Registration.exceptionHandler(&profile, fn(_id: Int, failure: Messaging.Failure[Fault], _context: Context.Context) -> Option[Str] {
+        if Messaging.raised(&failure) == Some(NotFound) { Some("guest") } else { None }
+      }),
+    Registration.exceptionAction(&profile, fn(id: Int, failure: Messaging.Failure[Fault], _context: Context.Context) -> () {
+        let _said = Io.writeLine("profile " + show(id) + ": " + Messaging.describe(&failure))
+      })
+  ]
+  let unhandledOnly = match Mediator.build(registrations) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let everyFailure = match Mediator.buildWith(&Mediator.Options{..Mediator.defaults(), actionScope: Catalog.ForAll}, registrations) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let found = Mediator.send(&unhandledOnly, &profile, 1)
+  let recovered = Mediator.send(&unhandledOnly, &profile, 2)
+  let failed = Mediator.send(&unhandledOnly, &profile, 3)
+  let _said = Io.writeLine("with every failure in scope:")
+  let recoveredAndSeen = Mediator.send(&everyFailure, &profile, 2)
+  if found == Ok("ada") && recovered == Ok("guest") && failed == Err(Messaging.Raised(Timeout)) && recoveredAndSeen == Ok("guest") { 0 } else { 1 }
+}

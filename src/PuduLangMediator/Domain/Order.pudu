@@ -1,0 +1,33 @@
+/** @Mediator.Domain.Order.Module — where each component runs in a pipeline */
+module PuduLangMediator.Domain.Order
+
+/** @Mediator.Domain.Order.Layer — the kinds of component a pipeline orders */
+export type Layer = Behaviors | PreProcessors | PostProcessors | ExceptionActions | NotificationHandlers | StreamBehaviors
+
+/** @Mediator.Domain.Order.Mark — one registration, open or for one kind */
+export type Mark = Open(Layer, Int) | Closed(Layer, Str)
+
+/** @Mediator.Domain.Order.Pick — a shared open component or the kind's own */
+export type Pick = Shared(Int) | Own(Int)
+
+/// The components of one layer that apply to the kind named `name`, in registration order: every
+/// open one by its index among open components, and each of the kind's own by its index among
+/// the kind's own.
+export fn picks(marks: &Array[Mark], layer: Layer, name: Str) -> Array[Pick] {
+  var found: Array[Pick] = []
+  var own = 0
+  for mark in marks {
+    match mark {
+      case Open(at, index) => {
+        if at == layer { found = found.push(Shared(index)) }
+      }
+      case Closed(at, owner) => {
+        if at == layer && owner == name {
+          found = found.push(Own(own))
+          own = own + 1
+        }
+      }
+    }
+  }
+  found
+}

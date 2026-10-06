@@ -1,0 +1,69 @@
+/** @Test.Publisher.Suite — components depending on the publisher seam */
+module PuduLangMediator.PublisherTest
+
+import Std.Io as Io
+import Std.Test as Test
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Mediator as Mediator
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Notification as Notification
+import PuduLangMediator.Publisher as Publisher
+import PuduLangMediator.Registration as Registration
+import PuduLangMediator.Utils.Shared as Shared
+
+/** @Test.Publisher.Recording — a test double that records what it was asked to publish */
+type Recording = { published: Shared.Shared[Array[Str]] }
+
+impl Publisher.Publisher for Recording {
+  /// Records the notification.
+  fn publish[N, E](self: &Self, subject: &Notification.Kind[N, E], notification: N, context: Context.Context) -> Messaging.Outcome[(), E] {
+    let line = subject.info.name + " " + show(notification)
+    Shared.update(&self.published, |held: Array[Str]| held.push(line))
+    Ok(())
+  }
+
+  /// Records the envelope.
+  fn broadcast(self: &Self, envelope: Message.Envelope, context: Context.Context) -> Message.Answer {
+    let line = envelope.info.name + " " + envelope.summary
+    Shared.update(&self.published, |held: Array[Str]| held.push(line))
+    Message.unheard(&envelope.info)
+  }
+}
+
+/// A component that only publishes: it announces a sign-up through whatever publisher it is given.
+fn signUp(publisher: dynamic Publisher.Publisher, joined: &Notification.Kind[Str, Str], name: Str) -> Messaging.Outcome[(), Str] {
+  publisher.publish(joined, name, Context.create())
+}
+
+/// Runs the suite.
+fn main() -> Int {
+  let joined: Notification.Kind[Str, Str] = Notification.kind("joined")
+  let welcomed = Shared.shared([])
+  let mediator = match Mediator.build([
+      Registration.notificationHandler(&joined, "welcome", fn(name: Str, _context: Context.Context) -> Messaging.Outcome[(), Str] {
+          Shared.update(&welcomed, |held: Array[Str]| held.push(name))
+          Ok(())
+        })
+    ]) {
+    case Ok(found) => found
+    case Err(invalid) => panic(Mediator.explain(&invalid))
+  }
+  let recording = Recording{published: Shared.shared([])}
+  let real: dynamic Publisher.Publisher = mediator
+  let double: dynamic Publisher.Publisher = recording
+  let announced = signUp(real, &joined, "ada")
+  let recorded = signUp(double, &joined, "grace")
+  let broadcast = real.broadcast(Notification.envelope(&joined, "linus"), Context.create())
+  let _recordedBroadcast = double.broadcast(Notification.envelope(&joined, "barbara"), Context.create())
+  let checks = Test.suite("Publisher", &[
+      Test.equals("a mediator stands for a publisher", &(announced, Shared.current(&welcomed)), &(Ok(()), ["ada", "linus"])),
+      Test.equals("a mediator broadcasts as a publisher", &Notification.answerOf(&joined, &broadcast), &Some(Ok(()))),
+      Test.equals("a double records instead", &(recorded, Shared.current(&recording.published)), &(Ok(()), ["joined \"grace\"", "joined \"barbara\""]))
+    ])
+  let ran = Test.run(&checks)
+  for failure in Test.failuresOf(&ran) {
+    let _reported = Io.writeErrorLine(failure)
+  }
+  Test.report(&ran)
+}

@@ -1,0 +1,75 @@
+/** @Mediator.Request.Kind — requests answered by exactly one handler */
+module PuduLangMediator.Request
+
+import PuduLangMediator.Context as Context
+import PuduLangMediator.Message as Message
+import PuduLangMediator as Messaging
+import PuduLangMediator.Utils.Erasure as Erasure
+
+/** @Mediator.Request.Handler — answers one request */
+export type Handler[Q, R, E] = fn(Q, Context.Context) -> Messaging.Outcome[R, E]
+
+/** @Mediator.Request.Next — the rest of the pipeline, given the context to run it with */
+export type Next[R, E] = fn(Context.Context) -> Messaging.Outcome[R, E]
+
+/** @Mediator.Request.Behavior — wraps the rest of the pipeline for one kind */
+export type Behavior[Q, R, E] = fn(Q, Context.Context, Next[R, E]) -> Messaging.Outcome[R, E]
+
+/** @Mediator.Request.PreProcessor — runs before the handler; a failure stops the request */
+export type PreProcessor[Q, E] = fn(Q, Context.Context) -> Messaging.Outcome[(), E]
+
+/** @Mediator.Request.PostProcessor — runs after a handler that answered a value */
+export type PostProcessor[Q, R, E] = fn(Q, R, Context.Context) -> Messaging.Outcome[(), E]
+
+/** @Mediator.Request.ExceptionHandler — may answer a value in place of a failure */
+export type ExceptionHandler[Q, R, E] = fn(Q, Messaging.Failure[E], Context.Context) -> Option[R]
+
+/** @Mediator.Request.ExceptionAction — observes a failure that keeps propagating */
+export type ExceptionAction[Q, E] = fn(Q, Messaging.Failure[E], Context.Context) -> ()
+
+/** @Mediator.Request.Route — every component registered for one kind */
+export type Route[Q, R, E] = {
+  handlers: Array[Handler[Q, R, E]],
+  behaviors: Array[Behavior[Q, R, E]],
+  preProcessors: Array[PreProcessor[Q, E]],
+  postProcessors: Array[PostProcessor[Q, R, E]],
+  exceptionHandlers: Array[ExceptionHandler[Q, R, E]],
+  exceptionActions: Array[ExceptionAction[Q, E]]
+}
+
+/** @Mediator.Request.Kind — the typed identity of one request */
+export type Kind[Q, R, E] = {
+  info: Message.Info,
+  routes: Erasure.Slot[Route[Q, R, E]],
+  invokers: Erasure.Slot[Handler[Q, R, E]],
+  requests: Erasure.Slot[Q],
+  outcomes: Erasure.Slot[Messaging.Outcome[R, E]]
+}
+
+/// A kind of request answering `R` or failing with `E`. Make each kind once and share it: two
+/// kinds made by separate calls are different kinds, even under one name.
+export fn kind[Q, R, E](name: Str) -> Kind[Q, R, E] { made(name, Message.Query) }
+
+/// A kind of request answering no value.
+export fn command[Q, E](name: Str) -> Kind[Q, (), E] { made(name, Message.Command) }
+
+/// A kind with fresh slots under `name` and `shape`.
+fn made[Q, R, E](name: Str, shape: Message.Shape) -> Kind[Q, R, E] {
+  Kind{info: Message.Info{name: name, shape: shape, tags: []}, routes: Erasure.slot(), invokers: Erasure.slot(), requests: Erasure.slot(), outcomes: Erasure.slot()}
+}
+
+/// The same kind carrying `tags` as well, which open components may read.
+export fn tagged[Q, R, E](subject: &Kind[Q, R, E], tags: Array[Str]) -> Kind[Q, R, E] {
+  Kind{..*subject, info: Message.Info{..subject.info, tags: subject.info.tags.concat(tags)}}
+}
+
+/// A route with no components.
+export fn route[Q, R, E]() -> Route[Q, R, E] {
+  Route{handlers: [], behaviors: [], preProcessors: [], postProcessors: [], exceptionHandlers: [], exceptionActions: []}
+}
+
+/// An envelope carrying `request`, for a sender that does not name its type.
+export fn envelope[Q, R, E](subject: &Kind[Q, R, E], request: Q) -> Message.Envelope { Message.sealed(&subject.info, &subject.requests, request) }
+
+/// The outcome an answer holds, when this kind answered it.
+export fn answerOf[Q, R, E](subject: &Kind[Q, R, E], answer: &Message.Answer) -> Option[Messaging.Outcome[R, E]] { Message.read(&subject.outcomes, answer) }
